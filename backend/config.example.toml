@@ -1,0 +1,3 @@
+[pm3]
+game_root = "/partition3"
+rewrite_root = "/partition4"

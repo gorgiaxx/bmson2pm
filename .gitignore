@@ -1,0 +1,17 @@
+frontend/node_modules/
+frontend/dist/
+backend/.venv/
+backend/.pytest_cache/
+backend/**/__pycache__/
+backend/config.toml
+backend/*.egg-info/
+backend/data/projects/*
+!backend/data/projects/.gitkeep
+backend/data/pm3-exports/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+docs/
+backend/tests/
+.DS_Store
+*.pyc
