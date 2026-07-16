@@ -31,11 +31,7 @@ def validate_project(project: SongProject, difficulty: DifficultyId | None = Non
     for difficulty_id, chart in charts:
         ids = Counter(note.id for note in chart.notes)
         notes_by_lane: dict[int, list] = defaultdict(list)
-        simultaneous = Counter(
-            note.pulse for note in chart.notes
-            if lane_by_id.get(note.lane_id) is not None
-            and lane_by_id[note.lane_id].kind == "input"
-        )
+        simultaneous_lanes: dict[int, set[int]] = defaultdict(set)
         for note in chart.notes:
             if ids[note.id] > 1:
                 issues.append(
@@ -60,6 +56,9 @@ def validate_project(project: SongProject, difficulty: DifficultyId | None = Non
                     )
                 )
             notes_by_lane[note.lane_id].append(note)
+            lane = lane_by_id.get(note.lane_id)
+            if lane is not None and lane.kind == "input" and note.playable:
+                simultaneous_lanes[note.pulse].add(note.lane_id)
             if project.metadata.audio_duration > 0:
                 seconds = pulse_to_seconds(project.timing, note.pulse)
                 if seconds > project.metadata.audio_duration:
@@ -125,13 +124,44 @@ def validate_project(project: SongProject, difficulty: DifficultyId | None = Non
                     )
                 if note.length > 0:
                     active_long_notes.append(note)
-        for pulse, count in simultaneous.items():
-            if count > 2:
+        for pulse, active_lane_ids in simultaneous_lanes.items():
+            if len(active_lane_ids) <= 1:
+                continue
+            both_hand_lane_ids = {
+                lane_id for lane_id in active_lane_ids
+                if lane_by_id[lane_id].hand == "both"
+            }
+            if both_hand_lane_ids:
+                both_names = "、".join(
+                    lane_by_id[lane_id].display_name for lane_id in sorted(both_hand_lane_ids)
+                )
+                other_names = "、".join(
+                    lane_by_id[lane_id].display_name
+                    for lane_id in sorted(active_lane_ids - both_hand_lane_ids)
+                )
+                message = (
+                    f"{both_names}需要双手，不能与{other_names}同时激活"
+                    if other_names
+                    else f"{both_names}均需要双手，不能同时激活"
+                )
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        code="playability.both_hands_conflict",
+                        message=message,
+                        difficulty=difficulty_id,
+                        pulse=pulse,
+                    )
+                )
+            elif len(active_lane_ids) > 2:
+                lane_names = "、".join(
+                    lane_by_id[lane_id].display_name for lane_id in sorted(active_lane_ids)
+                )
                 issues.append(
                     ValidationIssue(
                         severity="warning",
                         code="playability.too_many_simultaneous",
-                        message=f"同一时刻有 {count} 个可操作音符",
+                        message=f"同一时刻激活了 {len(active_lane_ids)} 个 Track（{lane_names}），超出双手上限",
                         difficulty=difficulty_id,
                         pulse=pulse,
                     )

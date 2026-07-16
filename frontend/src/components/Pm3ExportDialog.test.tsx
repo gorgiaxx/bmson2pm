@@ -4,11 +4,31 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api'
 import { createDemoProject } from '../demo'
-import type { Pm3ExportPreview, Pm3ExportReport } from '../types'
+import type { Pm3ExportPreview, Pm3ExportReport, Pm3ResourcePackage, Pm3ResourceProfile } from '../types'
 import { Pm3ExportDialog } from './Pm3ExportDialog'
 
-function preview(songId: number, includeSongList: boolean): Pm3ExportPreview {
+function preview(
+  songId: number,
+  includeSongList: boolean,
+  profile: Pm3ResourceProfile = 'extracted-media-overlay',
+): Pm3ExportPreview {
   const stem = `p${String(songId).padStart(3, '0')}_hard`
+  const resourcePackage: Pm3ResourcePackage = {
+    profile, complete: false, song_id: songId,
+    audio: {
+      source_name: null, duration: null, preview_start: 0, preview_duration: null,
+      background: { available: false, source: null, size: null, output_path: `media/sound/BG/BG_${String(songId).padStart(3, '0')}.ogg` },
+      preview: { available: false, source: null, size: null, output_path: `media/sound/preview/p${String(songId).padStart(3, '0')}.wav` },
+    },
+    mv: { id: 0, available: true, mapping: `StageConfig.MV[${songId}] = 0`, requires_lua_rom_rebuild: profile !== 'squashfs-ota' },
+    rom: profile === 'squashfs-ota' ? {
+      available: true, bundle: 2,
+      files: ['ROMS/lua_script.rom', 'ROMS/sound.rom', 'ROMS/SOUND_BG2.rom', 'ROMS/SOUND_PRE2.rom'],
+      missing: [], tools: { mksquashfs: 'mksquashfs', unsquashfs: 'unsquashfs' },
+      source: 'game:ROMS + game:media（只读）',
+    } : null,
+    warnings: [],
+  }
   return {
     valid: true,
     filename: `${stem}.enc`,
@@ -23,6 +43,10 @@ function preview(songId: number, includeSongList: boolean): Pm3ExportPreview {
     ],
     target_version: 'MVP',
     resources: [],
+    include_resources: false,
+    mv_id: 0,
+    resource_profile: profile,
+    resource_package: resourcePackage,
     previews: {
       chart: {
         format: 'pm3-chart', filename: `${stem}.enc`, encoding: 'ascii', encrypted: true,
@@ -54,8 +78,8 @@ describe('Pm3ExportDialog', () => {
     const project = createDemoProject('pm3-export-project')
     project.metadata.game_song_id = 'p001'
     const previewMock = vi.spyOn(api, 'pm3ExportPreview').mockImplementation(
-      async (_projectId, _difficulty, songId, _slot, includeSongList) => (
-        preview(songId, includeSongList)
+      async (_projectId, _difficulty, songId, _slot, includeSongList, _includeResources, _mvId, profile) => (
+        preview(songId, includeSongList, profile)
       ),
     )
     vi.spyOn(api, 'pm3ExportTargets').mockResolvedValue([{
@@ -66,36 +90,43 @@ describe('Pm3ExportDialog', () => {
       title: project.metadata.title, difficulty: 'hard', target_version: 'MVP',
       target: { id: 'staging', label: '安全导出目录', kind: 'staging', path: '/tmp/exports' },
       filename: 'p042_hard.enc', song_id: 42, slot: 0, header: '0x13552068',
-      include_song_list: true, files: [], resources: [], warnings: [], stats: {},
+      include_song_list: true, include_resources: false, mv_id: 0,
+      resource_profile: 'extracted-media-overlay',
+      resource_package: preview(42, true).resource_package,
+      files: [], resources: [], warnings: [], stats: {},
       round_trip: { passed: true, notes_before: 2, notes_after: 2, events_after: 3 },
       rollback_available: false,
     } satisfies Pm3ExportReport)
     const onComplete = vi.fn()
 
-    render(<Pm3ExportDialog project={project} difficulty="hard" onClose={() => undefined} onComplete={onComplete} />)
-    await waitFor(() => expect(previewMock).toHaveBeenCalledWith(project.id, 'hard', 1, 0, false))
+    render(<Pm3ExportDialog project={project} difficulty="hard" onClose={() => undefined} onComplete={onComplete} onProjectChange={() => undefined} />)
+    await waitFor(() => expect(previewMock).toHaveBeenCalledWith(project.id, 'hard', 1, 0, false, false, 0, 'extracted-media-overlay'))
+
+    fireEvent.click(screen.getByRole('button', { name: '离线 ROM' }))
+    await waitFor(() => expect(previewMock).toHaveBeenCalledWith(project.id, 'hard', 1, 0, false, false, 0, 'squashfs-ota'))
+    fireEvent.click(screen.getByRole('button', { name: '文件覆盖' }))
 
     fireEvent.change(screen.getByRole('spinbutton', { name: '曲目序号' }), { target: { value: '42' } })
-    await waitFor(() => expect(previewMock).toHaveBeenCalledWith(project.id, 'hard', 42, 0, false))
+    await waitFor(() => expect(previewMock).toHaveBeenCalledWith(project.id, 'hard', 42, 0, false, false, 0, 'extracted-media-overlay'))
 
     fireEvent.click(screen.getByRole('tab', { name: 'update.lst' }))
     expect((await screen.findAllByText(/rewrite\/script_download\/p042_hard\.enc/)).length).toBeGreaterThan(0)
 
-    fireEvent.click(screen.getByRole('checkbox', { name: '同时重建 SongList.enc' }))
-    await waitFor(() => expect(previewMock).toHaveBeenCalledWith(project.id, 'hard', 42, 0, true))
+    fireEvent.click(screen.getByRole('checkbox', { name: '重建 SongList.enc' }))
+    await waitFor(() => expect(previewMock).toHaveBeenCalledWith(project.id, 'hard', 42, 0, true, false, 0, 'extracted-media-overlay'))
     const songListTab = await screen.findByRole('tab', { name: 'SongList 明文' })
     await waitFor(() => expect((songListTab as HTMLButtonElement).disabled).toBe(false))
     fireEvent.click(songListTab)
     expect((await screen.findAllByText(/p042_hard/)).length).toBeGreaterThan(0)
 
     fireEvent.change(screen.getByRole('spinbutton', { name: '曲目序号' }), { target: { value: '43' } })
-    await waitFor(() => expect(previewMock).toHaveBeenCalledWith(project.id, 'hard', 43, 0, true))
+    await waitFor(() => expect(previewMock).toHaveBeenCalledWith(project.id, 'hard', 43, 0, true, false, 0, 'extracted-media-overlay'))
     await waitFor(() => expect(screen.getAllByText(/p043_hard/).length).toBeGreaterThan(0))
     expect(screen.queryAllByText(/p042_hard/)).toHaveLength(0)
 
     fireEvent.click(screen.getByRole('button', { name: '生成安全包' }))
     await waitFor(() => expect(exportMock).toHaveBeenCalledWith(
-      project.id, 'hard', 'staging', 43, 0, true,
+      project.id, 'hard', 'staging', 43, 0, true, false, 0, 'extracted-media-overlay',
     ))
     await waitFor(() => expect(onComplete).toHaveBeenCalled())
   })

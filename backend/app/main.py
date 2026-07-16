@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import mimetypes
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .adapters import (
     BmsAdapter,
@@ -42,6 +43,12 @@ from .services.bms_resources import (
     visual_resource_kind,
 )
 from .services.pm3_export import Pm3ExportError, Pm3ExportService
+from .services.pm3_ota_audit import Pm3OtaAuditError, Pm3OtaAuditor
+from .services.pm3_resources import (
+    MAX_PM3_AUDIO_BYTES,
+    Pm3ResourceError,
+    prepare_pm3_audio,
+)
 from .services.pm3_workspace import Pm3Workspace, Pm3WorkspaceError
 from .storage import ProjectAssetError, ProjectNotFoundError, ProjectStore
 
@@ -66,6 +73,26 @@ class Pm3ExportRequest(BaseModel):
     slot: int | None = None
     song_id: int | None = None
     include_song_list: bool = False
+    include_resources: bool = False
+    mv_id: int = 0
+    resource_profile: Literal["extracted-media-overlay", "squashfs-ota"] = "extracted-media-overlay"
+
+
+class Pm3VersionEntryRequest(BaseModel):
+    project_id: str
+    difficulty: DifficultyId
+    song_id: int = Field(ge=0, le=999)
+    slot: int = Field(default=0, ge=0, le=9)
+    mv_id: int = Field(default=0, ge=0, le=19)
+
+
+class Pm3VersionRequest(BaseModel):
+    version_name: str = Field(pattern=r"^ver[0-9]{3}$")
+    entries: list[Pm3VersionEntryRequest] = Field(min_length=1, max_length=50)
+
+
+class Pm3OtaChainRequest(BaseModel):
+    export_ids: list[str] = Field(min_length=1, max_length=20)
 
 
 def create_app(
@@ -83,7 +110,12 @@ def create_app(
     )
     app.state.store = store or ProjectStore()
     app.state.pm3_workspace = pm3_workspace or Pm3Workspace()
-    app.state.pm3_export = pm3_export_service or Pm3ExportService(workspace=app.state.pm3_workspace)
+    app.state.pm3_export = pm3_export_service or Pm3ExportService(
+        workspace=app.state.pm3_workspace,
+        project_store=app.state.store,
+    )
+    app.state.pm3_export.project_store = app.state.store
+    app.state.pm3_ota_audit = Pm3OtaAuditor(app.state.pm3_export, app.state.pm3_workspace)
     bmson_adapter = BmsonAdapter()
     bms_adapter = BmsAdapter()
     notelist_adapter = NoteListAdapter()
@@ -481,6 +513,57 @@ def create_app(
     def pm3_export_targets() -> list[dict[str, object]]:
         return app.state.pm3_export.target_descriptors()
 
+    @app.get("/api/pm3/version-candidates")
+    def pm3_version_candidates() -> list[dict[str, object]]:
+        try:
+            return app.state.pm3_export.version_candidates()
+        except (Pm3ExportError, Pm3WorkspaceError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/pm3/versions/preview")
+    def preview_pm3_version(request: Pm3VersionRequest) -> dict[str, object]:
+        try:
+            return app.state.pm3_export.preview_version(
+                version_name=request.version_name,
+                entries=[entry.model_dump() for entry in request.entries],
+            )
+        except (Pm3ExportError, Pm3FormatError, Pm3WorkspaceError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/pm3/versions/export")
+    def export_pm3_version(request: Pm3VersionRequest) -> dict[str, object]:
+        try:
+            return app.state.pm3_export.export_version(
+                version_name=request.version_name,
+                entries=[entry.model_dump() for entry in request.entries],
+            )
+        except (Pm3ExportError, Pm3FormatError, Pm3WorkspaceError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/projects/{project_id}/pm3/audio",
+        response_model=SongProject,
+    )
+    async def prepare_project_pm3_audio(
+        project_id: str,
+        file: UploadFile = File(...),
+        preview_start: float = Form(0, ge=0, le=24 * 60 * 60),
+        preview_duration: float = Form(12, ge=1, le=60),
+    ) -> SongProject:
+        project = get_project(project_id)
+        payload = await file.read(MAX_PM3_AUDIO_BYTES + 1)
+        try:
+            return prepare_pm3_audio(
+                app.state.store,
+                project,
+                filename=file.filename or "music",
+                payload=payload,
+                preview_start=preview_start,
+                preview_duration=preview_duration,
+            )
+        except (Pm3ResourceError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.get("/api/projects/{project_id}/export/pm3/preview")
     def preview_pm3_export(
         project_id: str,
@@ -488,11 +571,19 @@ def create_app(
         slot: int | None = Query(None, ge=0, le=9),
         song_id: int | None = Query(None, ge=0, le=999),
         include_song_list: bool = Query(False),
+        include_resources: bool = Query(False),
+        mv_id: int = Query(0, ge=0, le=19),
+        resource_profile: Literal["extracted-media-overlay", "squashfs-ota"] = Query(
+            "extracted-media-overlay"
+        ),
     ) -> dict[str, object]:
         try:
             return app.state.pm3_export.preview(
                 get_project(project_id), difficulty, slot=slot, song_id=song_id,
                 include_song_list=include_song_list,
+                include_resources=include_resources,
+                mv_id=mv_id,
+                resource_profile=resource_profile,
             )
         except (Pm3ExportError, Pm3FormatError, Pm3WorkspaceError, OSError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -505,6 +596,9 @@ def create_app(
                 target_id=request.target_id, slot=request.slot,
                 song_id=request.song_id,
                 include_song_list=request.include_song_list,
+                include_resources=request.include_resources,
+                mv_id=request.mv_id,
+                resource_profile=request.resource_profile,
             )
         except (Pm3ExportError, Pm3FormatError, Pm3WorkspaceError, OSError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -519,6 +613,24 @@ def create_app(
             return app.state.pm3_export.get_report(export_id)
         except Pm3ExportError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/pm3/exports/{export_id}/audit")
+    def audit_pm3_export(export_id: str) -> dict[str, object]:
+        try:
+            return app.state.pm3_ota_audit.audit_export(export_id)
+        except Pm3ExportError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (Pm3OtaAuditError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/pm3/exports/audit-chain")
+    def audit_pm3_export_chain(request: Pm3OtaChainRequest) -> dict[str, object]:
+        try:
+            return app.state.pm3_ota_audit.simulate_chain(request.export_ids)
+        except Pm3ExportError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (Pm3OtaAuditError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/pm3/exports/{export_id}/download")
     def download_pm3_export(export_id: str) -> FileResponse:

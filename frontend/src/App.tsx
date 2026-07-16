@@ -7,6 +7,7 @@ import { Header } from './components/Header'
 import { Inspector } from './components/Inspector'
 import { Pm3ResearchDialog } from './components/Pm3ResearchDialog'
 import { Pm3ExportDialog } from './components/Pm3ExportDialog'
+import { Pm3VersionDialog } from './components/Pm3VersionDialog'
 import { Sidebar } from './components/Sidebar'
 import { Timeline } from './components/Timeline'
 import { Transport } from './components/Transport'
@@ -73,6 +74,7 @@ export default function App() {
   const [bmsImportBusy, setBmsImportBusy] = useState(false)
   const [pm3ResearchOpen, setPm3ResearchOpen] = useState(false)
   const [pm3ExportOpen, setPm3ExportOpen] = useState(false)
+  const [pm3VersionOpen, setPm3VersionOpen] = useState(false)
   const { audio, error: audioError, load: loadAudio, clear: clearAudio } = useAudioFile()
   const playback = usePlayback(project, difficulty, audio?.buffer ?? null)
   const timingIndex = useMemo(() => createTimingIndex(project.timing), [project.timing])
@@ -242,6 +244,10 @@ export default function App() {
     }
     try {
       await api.saveProject(project)
+      if (format === 'pm3-version') {
+        setPm3VersionOpen(true)
+        return
+      }
       const baseIssues = await api.validateProject(project.id, difficulty)
       const compatibility = format === 'bms' ? await api.bmsCompatibility(project.id, difficulty) : []
       const found = [...baseIssues, ...compatibility]
@@ -421,11 +427,23 @@ export default function App() {
           project={project}
           difficulty={difficulty}
           onClose={() => setPm3ExportOpen(false)}
+          onProjectChange={(updated) => setProject(updated, false)}
           onComplete={(report) => showToast(
             'success',
             report.status === 'rolled_back'
               ? `PM3 ${report.filename} 已回滚`
               : `PM3 ${report.filename} ${report.status === 'published' ? '已发布' : '安全包已生成'}`,
+          )}
+        />
+      )}
+      {pm3VersionOpen && (
+        <Pm3VersionDialog
+          currentProjectId={project.id}
+          currentDifficulty={difficulty}
+          onClose={() => setPm3VersionOpen(false)}
+          onComplete={(report) => showToast(
+            'success',
+            `PM3 ${report.version_name} 已合并 ${report.stats.song_count} 首歌曲`,
           )}
         />
       )}

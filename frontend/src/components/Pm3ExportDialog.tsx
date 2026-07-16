@@ -9,18 +9,22 @@ import {
   ListMusic,
   ListOrdered,
   LoaderCircle,
+  Music2,
   PackageCheck,
   RotateCcw,
   ShieldCheck,
+  Upload,
+  Video,
   X,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import type {
   DifficultyId,
   Pm3ExportPreview,
   Pm3ExportReport,
   Pm3ExportTarget,
+  Pm3ResourceProfile,
   SongProject,
 } from '../types'
 
@@ -29,10 +33,14 @@ interface Pm3ExportDialogProps {
   difficulty: DifficultyId
   onClose: () => void
   onComplete: (report: Pm3ExportReport) => void
+  onProjectChange: (project: SongProject) => void
 }
+
+const PM3_MV_IDS = Array.from({ length: 20 }, (_, value) => value).filter((value) => value !== 17)
 
 function sizeLabel(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
   return `${(bytes / 1024).toFixed(1)} KB`
 }
 
@@ -44,13 +52,41 @@ function initialSongId(project: SongProject): string {
 
 type PreviewTab = 'chart' | 'update_list' | 'song_list'
 
-export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm3ExportDialogProps) {
+function pm3AudioConfig(project: SongProject): Record<string, unknown> {
+  const packageConfig = project.game_specific_data.pm3_package
+  if (!packageConfig || typeof packageConfig !== 'object' || Array.isArray(packageConfig)) return {}
+  const audio = (packageConfig as Record<string, unknown>).audio
+  return audio && typeof audio === 'object' && !Array.isArray(audio)
+    ? audio as Record<string, unknown>
+    : {}
+}
+
+export function Pm3ExportDialog({
+  project,
+  difficulty,
+  onClose,
+  onComplete,
+  onProjectChange,
+}: Pm3ExportDialogProps) {
   const sourceSlot = project.game_specific_data.pm3_slot
+  const initialAudio = pm3AudioConfig(project)
+  const audioInputRef = useRef<HTMLInputElement>(null)
   const [slot, setSlot] = useState(typeof sourceSlot === 'number' && sourceSlot >= 0 && sourceSlot <= 9 ? sourceSlot : 0)
   const [songIdInput, setSongIdInput] = useState(() => initialSongId(project))
   const [targets, setTargets] = useState<Pm3ExportTarget[]>([])
   const [targetId, setTargetId] = useState('staging')
   const [includeSongList, setIncludeSongList] = useState(false)
+  const [includeResources, setIncludeResources] = useState(false)
+  const [resourceProfile, setResourceProfile] = useState<Pm3ResourceProfile>('extracted-media-overlay')
+  const [mvId, setMvId] = useState(0)
+  const [audioFile, setAudioFile] = useState<File | null>(null)
+  const [previewStart, setPreviewStart] = useState(
+    typeof initialAudio.preview_start === 'number' ? initialAudio.preview_start : project.metadata.preview_time,
+  )
+  const [previewDuration, setPreviewDuration] = useState(
+    typeof initialAudio.preview_duration === 'number' ? initialAudio.preview_duration : 12,
+  )
+  const [audioRevision, setAudioRevision] = useState(0)
   const [preview, setPreview] = useState<Pm3ExportPreview | null>(null)
   const [report, setReport] = useState<Pm3ExportReport | null>(null)
   const [busy, setBusy] = useState(false)
@@ -59,7 +95,12 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
   const songId = /^\d{1,3}$/.test(songIdInput) && Number(songIdInput) <= 999
     ? Number(songIdInput)
     : null
-  const currentPreview = preview?.song_id === songId ? preview : null
+  const currentPreview = preview?.song_id === songId
+    && preview.include_resources === includeResources
+    && preview.mv_id === mvId
+    && preview.resource_profile === resourceProfile
+    ? preview
+    : null
   const selectedTarget = useMemo(
     () => targets.find((target) => target.id === targetId),
     [targetId, targets],
@@ -79,12 +120,15 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
     setError(null)
     if (songId === null) return () => { cancelled = true }
     const timer = window.setTimeout(() => {
-      void api.pm3ExportPreview(project.id, difficulty, songId, slot, includeSongList)
+      void api.pm3ExportPreview(
+        project.id, difficulty, songId, slot, includeSongList, includeResources, mvId,
+        resourceProfile,
+      )
         .then((value) => { if (!cancelled) setPreview(value) })
         .catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : 'PM3 预检失败') })
     }, 120)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [difficulty, includeSongList, project.id, slot, songId])
+  }, [audioRevision, difficulty, includeResources, includeSongList, mvId, project.id, resourceProfile, slot, songId])
 
   useEffect(() => {
     if (!includeSongList && previewTab === 'song_list') setPreviewTab('chart')
@@ -96,12 +140,32 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
     try {
       if (songId === null) return
       const completed = await api.exportPm3(
-        project.id, difficulty, targetId, songId, slot, includeSongList,
+        project.id, difficulty, targetId, songId, slot, includeSongList, includeResources, mvId,
+        resourceProfile,
       )
       setReport(completed)
       onComplete(completed)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'PM3 导出失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const prepareAudio = async () => {
+    if (!audioFile) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.saveProject(project)
+      const updated = await api.preparePm3Audio(
+        project.id, audioFile, previewStart, previewDuration,
+      )
+      onProjectChange(updated)
+      setAudioFile(null)
+      setAudioRevision((value) => value + 1)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'PM3 音频资源生成失败')
     } finally {
       setBusy(false)
     }
@@ -126,6 +190,7 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
   const files = report?.files ?? currentPreview?.files ?? []
   const warnings = report?.warnings ?? currentPreview?.warnings ?? []
   const verified = report?.round_trip.passed ?? currentPreview?.stats.round_trip_verified === true
+  const resourcePackage = report?.resource_package ?? currentPreview?.resource_package
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
@@ -152,40 +217,130 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
           </div>
 
           {!report && (
-            <fieldset className="dialog-section pm3-export-options">
-              <legend>发布配置</legend>
-              <div className="pm3-export-fields">
-                <label>
-                  <span><PackageCheck size={13} />目标</span>
-                  <select value={targetId} onChange={(event) => setTargetId(event.target.value)} disabled={busy}>
-                    {targets.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}
-                  </select>
-                </label>
-                <label>
-                  <span><ListOrdered size={13} />曲目序号</span>
-                  <input
-                    type="number"
-                    min="0"
-                    max="999"
-                    step="1"
-                    value={songIdInput}
-                    onChange={(event) => setSongIdInput(event.target.value)}
-                    aria-invalid={songId === null}
+            <>
+              <fieldset className="dialog-section pm3-export-options">
+                <legend>发布配置</legend>
+                <div className="pm3-export-fields">
+                  <label>
+                    <span><PackageCheck size={13} />目标</span>
+                    <select value={targetId} onChange={(event) => setTargetId(event.target.value)} disabled={busy}>
+                      {targets.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    <span><ListOrdered size={13} />曲目序号</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="999"
+                      step="1"
+                      value={songIdInput}
+                      onChange={(event) => setSongIdInput(event.target.value)}
+                      aria-invalid={songId === null}
+                      disabled={busy}
+                    />
+                  </label>
+                  <label>
+                    <span title="由谱面加密 header 选择，与曲目序号无固定关系"><KeyRound size={13} />Key slot</span>
+                    <select value={slot} onChange={(event) => setSlot(Number(event.target.value))} disabled={busy}>
+                      {Array.from({ length: 10 }, (_, value) => <option key={value} value={value}>Slot {value}</option>)}
+                    </select>
+                  </label>
+                </div>
+                <div className="pm3-export-toggles">
+                  <label>
+                    <input type="checkbox" checked={includeSongList} onChange={(event) => setIncludeSongList(event.target.checked)} disabled={busy} />
+                    <span>重建 SongList.enc</span>
+                  </label>
+                  <label>
+                    <input type="checkbox" checked={includeResources} onChange={(event) => setIncludeResources(event.target.checked)} disabled={busy} />
+                    <span>{resourceProfile === 'squashfs-ota'
+                      ? '包含音乐、试听与 SquashFS ROM'
+                      : '包含音乐、试听与 MV 清单'}</span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset className="dialog-section pm3-resource-options">
+                <legend>歌曲资源</legend>
+                <div className="pm3-resource-mode" role="group" aria-label="资源包格式">
+                  <button
+                    type="button"
+                    className={resourceProfile === 'extracted-media-overlay' ? 'active' : ''}
+                    aria-pressed={resourceProfile === 'extracted-media-overlay'}
+                    onClick={() => setResourceProfile('extracted-media-overlay')}
                     disabled={busy}
-                  />
-                </label>
-                <label>
-                  <span title="由谱面加密 header 选择，与曲目序号无固定关系"><KeyRound size={13} />Key slot</span>
-                  <select value={slot} onChange={(event) => setSlot(Number(event.target.value))} disabled={busy}>
-                    {Array.from({ length: 10 }, (_, value) => <option key={value} value={value}>Slot {value}</option>)}
-                  </select>
-                </label>
-              </div>
-              <label className="pm3-songlist-option">
-                <input type="checkbox" checked={includeSongList} onChange={(event) => setIncludeSongList(event.target.checked)} disabled={busy} />
-                <span>同时重建 SongList.enc</span>
-              </label>
-            </fieldset>
+                  >
+                    <FileText size={12} />文件覆盖
+                  </button>
+                  <button
+                    type="button"
+                    className={resourceProfile === 'squashfs-ota' ? 'active' : ''}
+                    aria-pressed={resourceProfile === 'squashfs-ota'}
+                    onClick={() => setResourceProfile('squashfs-ota')}
+                    disabled={busy}
+                  >
+                    <FileArchive size={12} />离线 ROM
+                  </button>
+                </div>
+                <div className="pm3-resource-fields">
+                  <label className="pm3-audio-source">
+                    <span><Music2 size={13} />主音乐</span>
+                    <button type="button" className="button secondary" onClick={() => audioInputRef.current?.click()} disabled={busy}>
+                      <Upload size={13} />
+                      <span>{audioFile?.name ?? resourcePackage?.audio.source_name ?? '选择音频'}</span>
+                    </button>
+                  </label>
+                  <label>
+                    <span>试听起点</span>
+                    <div className="pm3-number-unit"><input type="number" min="0" step="0.1" value={previewStart} onChange={(event) => setPreviewStart(Number(event.target.value))} disabled={busy} /><i>s</i></div>
+                  </label>
+                  <label>
+                    <span>试听长度</span>
+                    <div className="pm3-number-unit"><input type="number" min="1" max="60" step="0.1" value={previewDuration} onChange={(event) => setPreviewDuration(Number(event.target.value))} disabled={busy} /><i>s</i></div>
+                  </label>
+                  <label>
+                    <span><Video size={13} />MV 预设</span>
+                    <select value={mvId} onChange={(event) => setMvId(Number(event.target.value))} disabled={busy}>
+                      {PM3_MV_IDS.map((value) => <option key={value} value={value}>MV {value}</option>)}
+                    </select>
+                  </label>
+                  <button type="button" className="button primary pm3-prepare-audio" onClick={() => void prepareAudio()} disabled={busy || !audioFile || !Number.isFinite(previewStart) || !Number.isFinite(previewDuration)}>
+                    {busy ? <LoaderCircle className="spin" size={13} /> : <Music2 size={13} />}
+                    生成音频资源
+                  </button>
+                </div>
+                <input
+                  ref={audioInputRef}
+                  type="file"
+                  accept=".wav,.ogg,.mp3,.flac,.aif,.aiff,audio/*"
+                  hidden
+                  onChange={(event) => {
+                    setAudioFile(event.target.files?.[0] ?? null)
+                    event.currentTarget.value = ''
+                  }}
+                />
+                {resourcePackage && (
+                  <div className={`pm3-resource-status ${resourcePackage.rom ? 'has-rom' : ''}`} aria-label="PM3 资源状态">
+                    <span className={resourcePackage.audio.background.available ? 'ready' : ''}>
+                      <i />主音乐<code>{resourcePackage.audio.background.output_path}</code>
+                    </span>
+                    <span className={resourcePackage.audio.preview.available ? 'ready' : ''}>
+                      <i />试听<code>{resourcePackage.audio.preview.output_path}</code>
+                    </span>
+                    <span className="ready"><i />MV<code>{resourcePackage.mv.mapping}</code></span>
+                    {resourcePackage.rom && (
+                      <span className={resourcePackage.rom.available ? 'ready' : ''}>
+                        <i />ROM
+                        <code>{resourcePackage.rom.available
+                          ? `BG/PRE ${resourcePackage.rom.bundle} · LUA`
+                          : resourcePackage.rom.missing.join('、')}</code>
+                      </span>
+                    )}
+                  </div>
+                )}
+              </fieldset>
+            </>
           )}
 
           {report && (
@@ -201,7 +356,7 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
             <div className="pm3-artifact-head"><span>路径</span><span>大小</span><span>MD5</span></div>
             {files.map((file) => (
               <div className="pm3-artifact-row" key={file.path}>
-                <code>{file.path}</code><span>{sizeLabel(file.size)}</span><code>{file.md5.slice(0, 12)}</code>
+                <code>{file.path}</code><span>{file.pending ? '构建时' : sizeLabel(file.size)}</span><code>{file.pending ? 'PENDING' : file.md5.slice(0, 12)}</code>
               </div>
             ))}
             {!currentPreview && !error && songId !== null && <div className="pm3-artifact-loading"><LoaderCircle className="spin" size={15} />正在重建与验证</div>}
@@ -225,12 +380,16 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
         </div>
 
         <footer className="dialog-footer">
-          <span>{selectedTarget?.kind === 'deployment' ? '备份 · 原子替换 · 写后校验' : 'rewrite overlay · ZIP · export report'}</span>
+          <span>{selectedTarget?.kind === 'deployment'
+            ? '备份 · 原子替换 · 写后校验'
+            : resourceProfile === 'squashfs-ota'
+              ? 'PowerOn update.lst · SquashFS 4.0 · ZIP'
+              : 'rewrite overlay · ZIP · export report'}</span>
           <div>
             {report && <button type="button" className="button secondary" onClick={() => void api.downloadPm3(report.export_id)}><Download size={14} />下载 ZIP</button>}
             {report?.rollback_available && <button type="button" className="button secondary danger" onClick={() => void rollback()} disabled={busy}><RotateCcw size={14} />回滚</button>}
             {!report && <button type="button" className="button secondary" onClick={onClose} disabled={busy}>取消</button>}
-            {!report && <button type="button" className="button primary" onClick={() => void submit()} disabled={busy || !currentPreview || !!error || songId === null || !targets.length}>
+            {!report && <button type="button" className="button primary" onClick={() => void submit()} disabled={busy || !currentPreview?.valid || !!error || songId === null || !targets.length}>
               {busy ? <LoaderCircle className="spin" size={14} /> : <PackageCheck size={14} />}
               {selectedTarget?.kind === 'deployment' ? '备份并发布' : '生成安全包'}
             </button>}

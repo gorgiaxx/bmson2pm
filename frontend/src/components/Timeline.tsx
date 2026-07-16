@@ -123,11 +123,23 @@ export function Timeline({
   useEffect(() => {
     const target = wrapRef.current
     if (!target) return
+    let frame = 0
     const observer = new ResizeObserver(([entry]) => {
-      setSize({ width: Math.max(600, Math.floor(entry.contentRect.width)), height: canvasHeight })
+      const width = Math.max(600, Math.floor(entry.contentRect.width))
+      window.cancelAnimationFrame(frame)
+      frame = window.requestAnimationFrame(() => {
+        setSize((current) => (
+          current.width === width && current.height === canvasHeight
+            ? current
+            : { width, height: canvasHeight }
+        ))
+      })
     })
     observer.observe(target)
-    return () => observer.disconnect()
+    return () => {
+      observer.disconnect()
+      window.cancelAnimationFrame(frame)
+    }
   }, [canvasHeight])
 
   useEffect(() => {

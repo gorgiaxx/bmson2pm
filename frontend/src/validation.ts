@@ -10,15 +10,17 @@ export function validateProjectLocally(project: SongProject, difficulty: Difficu
   const notes = project.difficulties[difficulty].notes
   const idCounts = new Map<string, number>()
   const byLane = new Map<number, Note[]>()
-  const simultaneous = new Map<number, number>()
+  const simultaneousLanes = new Map<number, Set<number>>()
 
   for (const note of notes) {
     idCounts.set(note.id, (idCounts.get(note.id) ?? 0) + 1)
     const laneNotes = byLane.get(note.lane_id) ?? []
     laneNotes.push(note)
     byLane.set(note.lane_id, laneNotes)
-    if (laneById.get(note.lane_id)?.kind === 'input') {
-      simultaneous.set(note.pulse, (simultaneous.get(note.pulse) ?? 0) + 1)
+    if (laneById.get(note.lane_id)?.kind === 'input' && note.playable) {
+      const activeLanes = simultaneousLanes.get(note.pulse) ?? new Set<number>()
+      activeLanes.add(note.lane_id)
+      simultaneousLanes.set(note.pulse, activeLanes)
     }
   }
 
@@ -65,12 +67,34 @@ export function validateProjectLocally(project: SongProject, difficulty: Difficu
     }
   }
 
-  for (const [pulse, count] of simultaneous) {
-    if (count <= 2) continue
-    issues.push({
-      id: issueId(), severity: 'warning', code: 'playability.too_many_simultaneous',
-      message: `同一时刻有 ${count} 个可操作音符`, difficulty, note_id: null, pulse,
-    })
+  for (const [pulse, activeLaneIds] of simultaneousLanes) {
+    if (activeLaneIds.size <= 1) continue
+    const orderedLaneIds = [...activeLaneIds].sort((left, right) => left - right)
+    const bothHandLanes = orderedLaneIds
+      .map((laneId) => laneById.get(laneId))
+      .filter((lane) => lane?.hand === 'both')
+    if (bothHandLanes.length) {
+      const bothHandLaneIds = new Set(bothHandLanes.map((lane) => lane?.id))
+      const bothNames = bothHandLanes.map((lane) => lane?.display_name).join('、')
+      const otherNames = orderedLaneIds
+        .filter((laneId) => !bothHandLaneIds.has(laneId))
+        .map((laneId) => laneById.get(laneId)?.display_name)
+        .join('、')
+      issues.push({
+        id: issueId(), severity: 'warning', code: 'playability.both_hands_conflict',
+        message: otherNames
+          ? `${bothNames}需要双手，不能与${otherNames}同时激活`
+          : `${bothNames}均需要双手，不能同时激活`,
+        difficulty, note_id: null, pulse,
+      })
+    } else if (activeLaneIds.size > 2) {
+      const laneNames = orderedLaneIds.map((laneId) => laneById.get(laneId)?.display_name).join('、')
+      issues.push({
+        id: issueId(), severity: 'warning', code: 'playability.too_many_simultaneous',
+        message: `同一时刻激活了 ${activeLaneIds.size} 个 Track（${laneNames}），超出双手上限`,
+        difficulty, note_id: null, pulse,
+      })
+    }
   }
   const anonymousLaneIds = new Set(project.lanes.filter((lane) => lane.kind === 'anonymous').map((lane) => lane.id))
   const anonymousNotes = notes.filter((note) => anonymousLaneIds.has(note.lane_id))

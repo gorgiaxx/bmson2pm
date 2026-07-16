@@ -11,9 +11,14 @@ import type {
   Pm3FileInspection,
   Pm3FileRef,
   Pm3Root,
+  Pm3ResourceProfile,
   Pm3ExportPreview,
   Pm3ExportReport,
   Pm3ExportTarget,
+  Pm3VersionCandidate,
+  Pm3VersionEntry,
+  Pm3VersionPreview,
+  Pm3VersionReport,
   SongProject,
   ValidationIssue,
 } from './types'
@@ -158,18 +163,56 @@ export const api = {
 
   pm3ExportTargets: () => jsonRequest<Pm3ExportTarget[]>('/api/pm3/export-targets'),
 
+  pm3VersionCandidates: () => jsonRequest<Pm3VersionCandidate[]>('/api/pm3/version-candidates'),
+
+  pm3VersionPreview: (versionName: string, entries: Pm3VersionEntry[]) =>
+    jsonRequest<Pm3VersionPreview>('/api/pm3/versions/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version_name: versionName, entries }),
+    }),
+
+  exportPm3Version: (versionName: string, entries: Pm3VersionEntry[]) =>
+    jsonRequest<Pm3VersionReport>('/api/pm3/versions/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version_name: versionName, entries }),
+    }),
+
+  preparePm3Audio: (
+    projectId: string,
+    file: File,
+    previewStart: number,
+    previewDuration: number,
+  ) => {
+    const body = new FormData()
+    body.append('file', file)
+    body.append('preview_start', String(previewStart))
+    body.append('preview_duration', String(previewDuration))
+    return jsonRequest<SongProject>(`/api/projects/${projectId}/pm3/audio`, {
+      method: 'POST',
+      body,
+    })
+  },
+
   pm3ExportPreview: (
     projectId: string,
     difficulty: DifficultyId,
     songId: number,
     slot: number,
     includeSongList: boolean,
+    includeResources: boolean,
+    mvId: number,
+    resourceProfile: Pm3ResourceProfile,
   ) => {
     const query = new URLSearchParams({
       difficulty,
       song_id: String(songId),
       slot: String(slot),
       include_song_list: String(includeSongList),
+      include_resources: String(includeResources),
+      mv_id: String(mvId),
+      resource_profile: resourceProfile,
     })
     return jsonRequest<Pm3ExportPreview>(`/api/projects/${projectId}/export/pm3/preview?${query}`)
   },
@@ -181,6 +224,9 @@ export const api = {
     songId: number,
     slot: number,
     includeSongList: boolean,
+    includeResources: boolean,
+    mvId: number,
+    resourceProfile: Pm3ResourceProfile,
   ) => jsonRequest<Pm3ExportReport>(`/api/projects/${projectId}/export/pm3`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -190,12 +236,20 @@ export const api = {
       song_id: songId,
       slot,
       include_song_list: includeSongList,
+      include_resources: includeResources,
+      mv_id: mvId,
+      resource_profile: resourceProfile,
     }),
   }),
 
   downloadPm3: (exportId: string) => download(
     `/api/pm3/exports/${exportId}/download`,
     `pm3-${exportId}.zip`,
+  ),
+
+  downloadPm3Version: (exportId: string, versionName: string) => download(
+    `/api/pm3/exports/${exportId}/download`,
+    `pm3-${versionName}.zip`,
   ),
 
   rollbackPm3: (exportId: string) => jsonRequest<Pm3ExportReport>(`/api/pm3/exports/${exportId}/rollback`, {

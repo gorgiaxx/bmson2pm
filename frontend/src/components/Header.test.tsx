@@ -37,5 +37,10 @@ describe('Header import format menu', () => {
     const file = new File(['{}'], 'chart.json', { type: 'application/json' })
     fireEvent.change(input as HTMLInputElement, { target: { files: [file] } })
     expect(onImport).toHaveBeenCalledWith([file], 'notelist')
+
+    fireEvent.click(screen.getByRole('button', { name: '导出谱面' }))
+    expect(screen.getByRole('menuitem', {
+      name: 'PM3 离线版本多曲共享 SquashFS ROM',
+    })).toBeTruthy()
   })
 })

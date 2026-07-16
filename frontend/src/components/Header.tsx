@@ -9,6 +9,7 @@ import {
   FolderOpen,
   Import,
   ListMusic,
+  Layers3,
   LoaderCircle,
   Microscope,
   PackageCheck,
@@ -180,6 +181,9 @@ export function Header({ connected, onImport, onExport, onNewProject, onResearch
               </button>
               <button type="button" role="menuitem" onClick={() => chooseExport('pm3')} disabled={!connected}>
                 <PackageCheck size={15} /><span><strong>PM3 更新包</strong><small>加密谱面与发布报告</small></span>
+              </button>
+              <button type="button" role="menuitem" onClick={() => chooseExport('pm3-version')} disabled={!connected}>
+                <Layers3 size={15} /><span><strong>PM3 离线版本</strong><small>多曲共享 SquashFS ROM</small></span>
               </button>
             </div>
           )}

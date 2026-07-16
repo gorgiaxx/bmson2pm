@@ -438,11 +438,21 @@ export function usePlayback(
     }
     keySoundFailuresRef.current.clear()
     const queue = available.filter(({ asset }) => !keySoundBuffersRef.current.has(asset.id))
-    setKeySoundStatus({
-      ready: available.length - queue.length,
-      total: available.length,
-      failed: 0,
-    })
+    let ready = available.length - queue.length
+    let failed = 0
+    let statusFrame = 0
+    const publishStatus = () => {
+      if (statusFrame) return
+      statusFrame = window.requestAnimationFrame(() => {
+        statusFrame = 0
+        setKeySoundStatus((current) => (
+          current.ready === ready && current.total === available.length && current.failed === failed
+            ? current
+            : { ready, total: available.length, failed }
+        ))
+      })
+    }
+    publishStatus()
     let cursor = 0
 
     const worker = async () => {
@@ -455,19 +465,24 @@ export function usePlayback(
           if (!cancelled) {
             keySoundBuffersRef.current.set(item.asset.id, buffer)
             keySoundBufferUrlsRef.current.set(item.asset.id, item.url)
-            setKeySoundStatus((status) => ({ ...status, ready: status.ready + 1 }))
+            ready += 1
+            publishStatus()
           }
         } catch {
           if (!cancelled) {
             keySoundFailuresRef.current.add(item.asset.id)
-            setKeySoundStatus((status) => ({ ...status, failed: status.failed + 1 }))
+            failed += 1
+            publishStatus()
           }
         }
       }
     }
     const count = Math.min(PRELOAD_WORKERS, queue.length)
     void Promise.all(Array.from({ length: count }, worker))
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      window.cancelAnimationFrame(statusFrame)
+    }
   }, [loadDecodedResource, prioritizedAssets, project.key_sounds])
 
   useEffect(() => {

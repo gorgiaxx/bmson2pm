@@ -10,6 +10,9 @@ make dev-api   # http://127.0.0.1:8000
 make dev-web   # http://127.0.0.1:5173
 ```
 
+PM3 音频生成需要 `ffmpeg`；离线 ROM 构建还需要 `mksquashfs` 与 `unsquashfs`。macOS
+可通过 `brew install ffmpeg squashfs` 安装，其他系统安装对应的 `squashfs-tools` 包。
+
 前端通过 Vite 将 `/api` 代理到 FastAPI。首次打开会加载内置示例谱面；左上角“导入”菜单会明确区分 BMSON、NoteList JSON 与传统 BMS，即使前两者都使用 `.json` 扩展名也不会混用解析器。右上角导出菜单可选择目标格式。
 
 ## 已实现
@@ -43,6 +46,10 @@ make dev-web   # http://127.0.0.1:5173
 - 下载 `.enc` 优先、内建 `.enccut` + 内置 cut table 回退的真实加载顺序
 - 音乐、Key 音、预览音频和 SWF MV 引用识别，不修改游戏只读源目录
 - PM3 原密文、cut data、明文 token、辅助 Track 与未知行原样保留
+- PM3 完整歌曲音频生成、PowerOn 格式 `update.lst`、SquashFS 音频分包、`sound.rom`
+  符号链接和 `lua_script.rom` MV 映射离线重建
+- PM3 多曲离线版本构建：一次合并多个项目/难度的 SongList、谱面、音频与跨分包 ROM，
+  输出可审计的 `verNNN` 目录和单一 `update.lst`
 
 PM3 文件级 Track、`BG.wav` 虚拟路径、SquashFS 音频分包和辅助 Track 的实证分析见
 [docs/pm3-chart-track-analysis.md](docs/pm3-chart-track-analysis.md)。
@@ -50,8 +57,11 @@ BMS Key 音资源关联与 AGEHA 实例验证见
 [docs/bms-resource-analysis.md](docs/bms-resource-analysis.md)。
 音频预解码、低延迟播放和 PM3 背景音乐加载策略见
 [docs/audio-playback-analysis.md](docs/audio-playback-analysis.md)。
+离线升级链、ROM 分包与静态验证边界见
+[docs/pm3-offline-ota-analysis.md](docs/pm3-offline-ota-analysis.md)。
 - PM3 明文谱面重建、`.enc` 加密、写后解密重解析与语义 Round-trip
 - rewrite 更新包、`update.lst` MD5 清单、SongList 可选重建、ZIP 与 JSON 导出报告
+- 多曲版本会从同一只读基线重建共享 ROM；不会把多个独立歌曲 ZIP 直接覆盖叠加
 - 仅白名单发布目标、发布前备份、原子替换、故障自动恢复与手动回滚
 
 ## 动态 Track 设计
@@ -63,7 +73,7 @@ BMS Key 音资源关联与 AGEHA 实例验证见
 BMS 导出会沿用匿名 Track 的原始 channel；BMSON 与 NoteList 导出也会写出对应的动态 lane/track 索引。PM3 导出要求玩家输入归入 Lane 1–6；其余 Track 必须在右键菜单中显式映射为 PM3 辅助 Track 6..15、17..23。只要当前难度仍有任何事件位于待分类 Track，PM3 预检就会阻止导出，而不是静默跳过；辅助事件写回但不计入 `TotalNote`。
 
 右上角显微镜按钮可打开 PM3 只读研究工作台。受信目录路径写在 `backend/config.toml`（已
-gitignore），从 `config.toml.example` 复制模板后填入真实路径；目前包含 `game`（p3 镜像）与
+gitignore），从 `config.example.toml` 复制模板后填入真实路径；目前包含 `game`（p3 镜像）与
 `rewrite`（p4 镜像，含 OTA 更新）两个根。cut table 已内置，不再依赖外部 A36 ROM 镜像；
 以上路径仍可用 `BMSON2PM_PM3_GAME_ROOT`、`BMSON2PM_PM3_REWRITE_ROOT` 等同名环境变量覆盖，
 或用 `BMSON2PM_CONFIG` 指向另一个配置文件。API 不接受任意服务器绝对路径。

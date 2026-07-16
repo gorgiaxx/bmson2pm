@@ -2,7 +2,7 @@ export type DifficultyId = 'easy' | 'normal' | 'hard' | 'special' | 'master'
 export type Severity = 'error' | 'warning' | 'info'
 export type EditorTool = 'select' | 'draw'
 export type ImportFormat = 'bmson' | 'notelist' | 'bms'
-export type ExportFormat = 'bmson' | 'notelist' | 'bms' | 'pm3'
+export type ExportFormat = 'bmson' | 'notelist' | 'bms' | 'pm3' | 'pm3-version'
 
 export interface Metadata {
   title: string
@@ -332,12 +332,51 @@ export interface Pm3ExportFile {
   size: number
   md5: string
   sha256: string
+  pending?: boolean
 }
 
 export interface Pm3ExportTextPreview {
   filename: string
   encoding: string
   text: string
+}
+
+export interface Pm3ResourceStatus {
+  available: boolean
+  source: string | null
+  size: number | null
+  output_path: string
+}
+
+export type Pm3ResourceProfile = 'extracted-media-overlay' | 'squashfs-ota'
+
+export interface Pm3ResourcePackage {
+  profile: Pm3ResourceProfile
+  complete: boolean
+  song_id: number
+  audio: {
+    source_name: string | null
+    duration: number | null
+    preview_start: number
+    preview_duration: number | null
+    background: Pm3ResourceStatus
+    preview: Pm3ResourceStatus
+  }
+  mv: {
+    id: number
+    available: boolean
+    mapping: string
+    requires_lua_rom_rebuild: boolean
+  }
+  rom: {
+    available: boolean
+    bundle: number
+    files: string[]
+    missing: string[]
+    tools: { mksquashfs: string | null; unsquashfs: string | null }
+    source: string
+  } | null
+  warnings: string[]
 }
 
 export interface Pm3ExportPreview {
@@ -351,6 +390,10 @@ export interface Pm3ExportPreview {
   files: Pm3ExportFile[]
   target_version: string
   resources: Array<Record<string, unknown>>
+  include_resources: boolean
+  mv_id: number
+  resource_profile: Pm3ResourceProfile
+  resource_package: Pm3ResourcePackage
   previews: {
     chart: Pm3ChartInspection
     update_list: Pm3ExportTextPreview
@@ -371,6 +414,10 @@ export interface Pm3ExportReport {
   slot: number
   header: string
   include_song_list: boolean
+  include_resources: boolean
+  mv_id: number
+  resource_profile: Pm3ResourceProfile
+  resource_package: Pm3ResourcePackage
   files: Pm3ExportFile[]
   resources: Array<Record<string, unknown>>
   warnings: string[]
@@ -379,4 +426,102 @@ export interface Pm3ExportReport {
   rollback_available: boolean
   published_at?: string
   rolled_back_at?: string
+}
+
+export interface Pm3VersionDifficulty {
+  id: DifficultyId
+  label: string
+  level: number
+  notes: number
+}
+
+export interface Pm3VersionCandidate {
+  project_id: string
+  title: string
+  artist: string
+  song_id: number | null
+  slot: number
+  mv_id: number
+  difficulties: Pm3VersionDifficulty[]
+  audio_ready: boolean
+  audio: {
+    background: Omit<Pm3ResourceStatus, 'output_path'>
+    preview: Omit<Pm3ResourceStatus, 'output_path'>
+  }
+  updated_at: string
+}
+
+export interface Pm3VersionEntry {
+  project_id: string
+  difficulty: DifficultyId
+  song_id: number
+  slot: number
+  mv_id: number
+}
+
+export interface Pm3VersionSong {
+  song_id: number
+  project_id: string
+  title: string
+  artist: string
+  mv_id: number
+  audio_ready: boolean
+  charts: Array<{
+    difficulty: DifficultyId
+    difficulty_label: string
+    level: number
+    slot: number
+    filename: string
+    note_objects: number
+    event_count: number
+  }>
+}
+
+export interface Pm3VersionPreview {
+  valid: boolean
+  version_name: string
+  songs: Pm3VersionSong[]
+  stats: {
+    song_count: number
+    chart_count: number
+    bundle_count: number
+    bundles: number[]
+    note_objects: number
+    event_count: number
+  }
+  rom: {
+    available: boolean
+    song_ids: number[]
+    bundles: number[]
+    files: string[]
+    missing: string[]
+    tools: { mksquashfs: string | null; unsquashfs: string | null }
+    source: string
+  }
+  files: Pm3ExportFile[]
+  warnings: string[]
+  previews: {
+    update_list: Pm3ExportTextPreview
+    song_list: Pm3ExportTextPreview
+  }
+}
+
+export interface Pm3VersionReport {
+  export_id: string
+  kind: 'pm3-version'
+  status: 'staged'
+  created_at: string
+  filename: string
+  version_name: string
+  target_version: string
+  target: { id: string; label: string; kind: string; path: string }
+  songs: Pm3VersionSong[]
+  stats: Pm3VersionPreview['stats']
+  rom: Pm3VersionPreview['rom']
+  resource_profile: 'squashfs-ota'
+  include_resources: true
+  include_song_list: true
+  files: Pm3ExportFile[]
+  warnings: string[]
+  rollback_available: false
 }
