@@ -48,6 +48,7 @@ class Pm3BuildResult:
     plaintext: bytes
     container: bytes
     filename: str
+    song_id: int
     header: int
     slot: int
     warnings: list[str]
@@ -144,7 +145,9 @@ class Pm3Adapter(ChartFormatAdapter):
             "wav_count": len(document.wavs),
             "unknown_line_count": len(document.unknown_lines),
             "warnings": list(document.warnings),
-            "text_preview": decrypted.plaintext[:32768].decode("ascii", errors="replace"),
+            "text_preview": decrypted.plaintext.decode(
+                encoding.replace("-replace", ""), errors="replace"
+            )[:32768],
             "resources": self._resource_manifest(document, song_info, game_root),
         }
         if song_info:
@@ -359,13 +362,20 @@ class Pm3Adapter(ChartFormatAdapter):
         difficulty: DifficultyId,
         *,
         slot: int | None = None,
+        song_id: int | None = None,
     ) -> Pm3BuildResult:
+        if song_id is not None and (
+            isinstance(song_id, bool) or not isinstance(song_id, int) or song_id not in range(1000)
+        ):
+            raise Pm3FormatError("PM3 曲目序号必须在 0..999")
         chart = project.difficulties[difficulty]
         warnings: list[str] = []
         source_document = self._source_document(project)
         bpm_changes = self._build_bpm_changes(project, warnings)
         rhythm_changes = self._build_rhythm_changes(project)
-        wavs, wav_by_asset = self._build_wavs(project, source_document, warnings)
+        wavs, wav_by_asset = self._build_wavs(
+            project, source_document, warnings, target_song_id=song_id,
+        )
         events = self._build_events(project, difficulty, wavs, wav_by_asset, warnings)
         playable_count = sum(
             1 for event in events if event.track in self.TRACK_TO_LANE
@@ -407,7 +417,12 @@ class Pm3Adapter(ChartFormatAdapter):
             raise Pm3FormatError(str(exc)) from exc
         if verified.plaintext != plaintext:
             raise Pm3FormatError("PM3 加密后解密校验不一致")
-        filename = self._output_filename(project, difficulty)
+        filename = self._output_filename(project, difficulty, song_id=song_id)
+        output_song_id = song_id
+        if output_song_id is None:
+            output_song_id = self._numeric_song_id(self._song_id(filename))
+        if output_song_id is None:
+            output_song_id = self._numeric_song_id(project.metadata.game_song_id) or 0
         if unknown_lines:
             warnings.append(f"已把 {len(unknown_lines)} 条未知源数据合并到重建文本末尾")
         input_lane_ids = {lane.id for lane in project.lanes if lane.kind == "input"}
@@ -431,8 +446,14 @@ class Pm3Adapter(ChartFormatAdapter):
             "round_trip_verified": True,
         }
         return Pm3BuildResult(
-            plaintext, container, filename, header, selected_slot,
-            list(dict.fromkeys(warnings)), stats,
+            plaintext=plaintext,
+            container=container,
+            filename=filename,
+            song_id=output_song_id,
+            header=header,
+            slot=selected_slot,
+            warnings=list(dict.fromkeys(warnings)),
+            stats=stats,
         )
 
     def round_trip_project(self, project: SongProject, difficulty: DifficultyId) -> dict[str, Any]:
@@ -515,8 +536,17 @@ class Pm3Adapter(ChartFormatAdapter):
         project: SongProject,
         source: Pm3ChartDocument | None,
         warnings: list[str],
+        *,
+        target_song_id: int | None = None,
     ) -> tuple[dict[int, str], dict[str, int]]:
         wavs = dict(source.wavs) if source else {}
+        if target_song_id is not None:
+            replacement = f"./{target_song_id:03d}/BG.wav"
+            for index, raw_path in list(wavs.items()):
+                if PurePosixPath(raw_path.replace("\\", "/")).name.lower() == "bg.wav":
+                    if raw_path != replacement:
+                        wavs[index] = replacement
+                        warnings.append(f"背景音乐逻辑路径已改为 {replacement}")
         by_asset: dict[str, int] = {}
         used = set(wavs)
         for asset in project.key_sounds:
@@ -717,7 +747,14 @@ class Pm3Adapter(ChartFormatAdapter):
             raise Pm3FormatError(f"PM3 文本含有 CP950 无法编码的字符：{exc}") from exc
 
     @staticmethod
-    def _output_filename(project: SongProject, difficulty: DifficultyId) -> str:
+    def _output_filename(
+        project: SongProject,
+        difficulty: DifficultyId,
+        *,
+        song_id: int | None = None,
+    ) -> str:
+        if song_id is not None:
+            return f"p{song_id:03d}_{difficulty.value}.enc"
         source = Path(project.metadata.source_name or "").stem
         if re.fullmatch(r"[A-Za-z0-9_-]+", source):
             if source.lower().endswith(tuple(f"_{value}" for value in Pm3Adapter.DIFFICULTY_SUFFIXES)):

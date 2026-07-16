@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { GripVertical, Volume2, VolumeX } from 'lucide-react'
 import { useEditorStore } from '../store'
 import { createTimingIndex, pulseToSeconds, secondsToPulse, snapPulseDelta } from '../timing'
-import { buildTimelineGrid } from '../timelineGrid'
+import { barNumberAtPulse, buildTimelineGrid } from '../timelineGrid'
 import type { Note, ValidationIssue } from '../types'
 import { TrackContextMenu } from './TrackContextMenu'
 
@@ -593,9 +593,9 @@ export function Timeline({
     setDrag(null)
   }
 
-  const visibleBeats = Math.max(1, Math.floor((size.width - labelWidth) / zoom))
-  const startBar = Math.floor(scrollPulse / resolution / 4) + 1
-  const endBar = Math.floor((scrollPulse / resolution + visibleBeats) / 4) + 1
+  const visibleEndPulse = scrollPulse + Math.max(0, (size.width - labelWidth) / zoom * resolution)
+  const startBar = barNumberAtPulse(scrollPulse, resolution, project.timing.bar_lines)
+  const endBar = barNumberAtPulse(visibleEndPulse, resolution, project.timing.bar_lines)
 
   return (
     <div className="timeline-shell" ref={wrapRef} onWheel={handleWheel}>

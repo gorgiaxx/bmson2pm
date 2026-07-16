@@ -156,6 +156,35 @@ describe('incremental editor history', () => {
     expect(useEditorStore.getState().project.lanes[0].color).toBe('#ef5350')
   })
 
+  it('manages Key sounds and protects assets referenced by Lanes or notes', () => {
+    const asset = {
+      id: 'manual-rim', name: 'Rim', filename: 'rim.wav', lane_ids: [], volume: 1,
+      delay_ms: 0, tags: [], source: 'manual', extensions: {},
+    }
+    useEditorStore.getState().addKeySound(asset)
+    useEditorStore.getState().updateKeySound(asset.id, {
+      name: 'Tight Rim', volume: 1.25, delay_ms: -8, tags: ['rim', 'accent'],
+    })
+    expect(useEditorStore.getState().project.key_sounds[0]).toMatchObject({
+      name: 'Tight Rim', volume: 1.25, delay_ms: -8, tags: ['rim', 'accent'],
+    })
+
+    useEditorStore.getState().setLaneDefaultKeySound(1, asset.id)
+    expect(useEditorStore.getState().project.lanes[0].default_key_sound_id).toBe(asset.id)
+    expect(useEditorStore.getState().removeKeySound(asset.id)).toBe(false)
+
+    useEditorStore.getState().setLaneDefaultKeySound(1, null)
+    expect(useEditorStore.getState().removeKeySound(asset.id)).toBe(true)
+    expect(useEditorStore.getState().project.key_sounds).toHaveLength(0)
+    useEditorStore.getState().undo()
+    expect(useEditorStore.getState().project.key_sounds[0].id).toBe(asset.id)
+
+    const note = useEditorStore.getState().project.difficulties.hard.notes[0]
+    useEditorStore.getState().selectOnly(note.id)
+    useEditorStore.getState().updateSelected({ key_sound_id: asset.id })
+    expect(useEditorStore.getState().removeKeySound(asset.id)).toBe(false)
+  })
+
   it('classifies an anonymous track as a non-scoring PM3 auxiliary track', () => {
     const project = createDemoProject('pm3-auxiliary-classification')
     project.lanes.push({

@@ -1,12 +1,13 @@
-import { AlertCircle, BarChart3, CheckCircle2, Copy, Film, Info, ListChecks, SlidersHorizontal, TriangleAlert } from 'lucide-react'
+import { AlertCircle, AudioLines, BarChart3, CheckCircle2, Copy, Film, Info, ListChecks, SlidersHorizontal, TriangleAlert } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { DIFFICULTIES } from '../constants'
 import { BgaPreview } from './BgaPreview'
+import { KeySoundLibrary } from './KeySoundLibrary'
 import { useEditorStore } from '../store'
 import { calculateStats } from '../timing'
 import type { DifficultyId, ValidationIssue } from '../types'
 
-type InspectorTab = 'properties' | 'issues' | 'stats' | 'bga'
+type InspectorTab = 'properties' | 'sounds' | 'issues' | 'stats' | 'bga'
 
 interface InspectorProps {
   issues: ValidationIssue[]
@@ -15,9 +16,10 @@ interface InspectorProps {
   position: number
   playing: boolean
   speed: number
+  onTriggerKeySound: (assetId: string) => void
 }
 
-export function Inspector({ issues, validating, onValidate, position, playing, speed }: InspectorProps) {
+export function Inspector({ issues, validating, onValidate, position, playing, speed, onTriggerKeySound }: InspectorProps) {
   const [tab, setTab] = useState<InspectorTab>('properties')
   const [copyTarget, setCopyTarget] = useState<DifficultyId>('normal')
   const project = useEditorStore((state) => state.project)
@@ -53,6 +55,7 @@ export function Inspector({ issues, validating, onValidate, position, playing, s
     <aside className="inspector">
       <div className="inspector-tabs" role="tablist">
         <button type="button" className={tab === 'properties' ? 'active' : ''} onClick={() => setTab('properties')} title="属性"><SlidersHorizontal size={15} /></button>
+        <button type="button" className={tab === 'sounds' ? 'active' : ''} onClick={() => setTab('sounds')} title="Key 音库"><AudioLines size={15} /></button>
         <button type="button" className={tab === 'issues' ? 'active' : ''} onClick={() => setTab('issues')} title="验证">
           <ListChecks size={15} />{issues.length > 0 && <i>{issues.length}</i>}
         </button>
@@ -138,6 +141,8 @@ export function Inspector({ issues, validating, onValidate, position, playing, s
           )}
         </div>
       )}
+
+      {tab === 'sounds' && <KeySoundLibrary onTriggerKeySound={onTriggerKeySound} />}
 
       {tab === 'issues' && (
         <div className="inspector-body">

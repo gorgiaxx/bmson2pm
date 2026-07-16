@@ -334,9 +334,16 @@ export interface Pm3ExportFile {
   sha256: string
 }
 
+export interface Pm3ExportTextPreview {
+  filename: string
+  encoding: string
+  text: string
+}
+
 export interface Pm3ExportPreview {
   valid: boolean
   filename: string
+  song_id: number
   slot: number
   header: string
   warnings: string[]
@@ -344,6 +351,11 @@ export interface Pm3ExportPreview {
   files: Pm3ExportFile[]
   target_version: string
   resources: Array<Record<string, unknown>>
+  previews: {
+    chart: Pm3ChartInspection
+    update_list: Pm3ExportTextPreview
+    song_list: Pm3ExportTextPreview | null
+  }
 }
 
 export interface Pm3ExportReport {
@@ -355,6 +367,7 @@ export interface Pm3ExportReport {
   target_version: string
   target: { id: string; label: string; kind: string; path: string }
   filename: string
+  song_id: number
   slot: number
   header: string
   include_song_list: boolean

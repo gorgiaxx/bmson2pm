@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest'
+// @vitest-environment jsdom
+
+import { renderHook, waitFor } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDemoProject } from '../demo'
 import type { KeySoundAsset } from '../types'
 import {
@@ -10,7 +13,10 @@ import {
   prioritizeKeySoundAssets,
   rollHitPulses,
   selectBmsPrimaryEvent,
+  usePlayback,
 } from './usePlayback'
+
+afterEach(() => vi.unstubAllGlobals())
 
 function asset(path: string, rootId = 'game'): KeySoundAsset {
   return {
@@ -54,6 +60,25 @@ describe('keySoundResourceUrl', () => {
     )
     expect(keySoundResourceUrl(bmsAsset('../01.ogg'))).toBeNull()
   })
+
+  it('creates a project-scoped URL for manually uploaded audio', () => {
+    const manual = {
+      ...bmsAsset('unused.ogg'),
+      source: 'manual',
+      extensions: {
+        editor: {
+          resource: {
+            project_id: 'manual-project',
+            path: 'key-sounds/manual-hit.wav',
+            exists: true,
+          },
+        },
+      },
+    }
+    expect(keySoundResourceUrl(manual)).toBe(
+      '/api/projects/manual-project/key-sound?path=key-sounds%2Fmanual-hit.wav',
+    )
+  })
 })
 
 describe('BMS automatic audio', () => {
@@ -94,6 +119,62 @@ describe('BMS automatic audio', () => {
     expect(mediaPlaybackWindow(0, 1.68, 119.67)).toEqual({ delay: 1.68, offset: 0 })
     expect(mediaPlaybackWindow(10, 1.68, 119.67)).toEqual({ delay: 0, offset: 8.32 })
     expect(mediaPlaybackWindow(121.35, 1.68, 119.67)).toBeNull()
+  })
+
+  it('promotes a decoded long channel 01 resource to automatic music state', async () => {
+    const project = createDemoProject('bms-state-project')
+    project.timing.initial_bpm = 120
+    project.timing.resolution = 240
+    project.key_sounds = [{
+      ...bmsAsset('keys/full-mix.ogg'),
+      id: 'full-mix',
+      name: 'Full mix',
+      volume: 0.75,
+      delay_ms: 250,
+    }]
+    project.unknown_data.bms_bgm_objects = [
+      { pulse: 240, value: '2A', line: 12, position: '1/4', key_sound_id: 'full-mix' },
+    ]
+    const samples = new Float32Array([0, 0.5, -0.25, 0])
+    const buffer = {
+      duration: 90,
+      length: samples.length,
+      numberOfChannels: 1,
+      getChannelData: () => samples,
+    } as unknown as AudioBuffer
+    class FakeAudioContext {
+      state: AudioContextState = 'running'
+      currentTime = 0
+      destination = {} as AudioDestinationNode
+      decodeAudioData = vi.fn(async () => buffer)
+      close = vi.fn(async () => { this.state = 'closed' })
+    }
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      arrayBuffer: async () => new ArrayBuffer(8),
+    } as Response))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { result, unmount } = renderHook(() => usePlayback(project, 'hard', null))
+    await waitFor(() => expect(result.current.autoMusic).not.toBeNull())
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/projects/project-1/key-sound?path=keys%2Ffull-mix.ogg',
+    )
+    expect(result.current.autoMusic).toMatchObject({
+      assetId: 'full-mix',
+      name: 'Full mix',
+      buffer,
+      startTime: 0.75,
+      volume: 0.75,
+    })
+    expect(result.current.autoMusic?.eventKey).toContain('bms-bgm:12:1/4:2A')
+    expect(result.current.autoMusic?.peaks).toHaveLength(2400)
+    expect(result.current.autoMusicLoading).toBeNull()
+    expect(result.current.musicStart).toBe(0.75)
+    expect(result.current.musicDuration).toBe(90)
+    unmount()
   })
 })
 

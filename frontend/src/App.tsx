@@ -368,6 +368,7 @@ export default function App() {
           position={playback.position}
           playing={playback.playing}
           speed={playback.speed}
+          onTriggerKeySound={playback.triggerKeySound}
         />
       </div>
       <Transport

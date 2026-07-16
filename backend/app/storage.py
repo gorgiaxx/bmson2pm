@@ -63,6 +63,18 @@ class ProjectStore:
             raise ProjectNotFoundError(relative_path)
         return target
 
+    def delete_asset(self, project_id: str, relative_path: str) -> None:
+        target = self.asset_path(project_id, relative_path)
+        target.unlink()
+        root = self._asset_root(project_id).resolve()
+        parent = target.parent
+        while parent != root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
     def clear_assets(self, project_id: str) -> None:
         root = self._asset_root(project_id)
         if root.exists():

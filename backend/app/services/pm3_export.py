@@ -75,20 +75,37 @@ class Pm3ExportService:
         difficulty: DifficultyId,
         *,
         slot: int | None = None,
+        song_id: int | None = None,
         include_song_list: bool = False,
     ) -> dict[str, Any]:
-        built = self.adapter.build_with_report(project, difficulty, slot=slot)
+        built = self.adapter.build_with_report(
+            project, difficulty, slot=slot, song_id=song_id,
+        )
         files = [self._file_info(f"rewrite/script_download/{built.filename}", built.container)]
+        song_list_preview = None
         if include_song_list:
-            song_list, song_warnings = self._build_song_list(project, difficulty, built)
+            song_list, song_list_plaintext, song_list_encoding, song_warnings = self._build_song_list(
+                project, difficulty, built
+            )
             files.append(self._file_info("rewrite/script_download/SongList.enc", song_list))
+            song_list_preview = {
+                "filename": "rewrite/script_download/SongList.enc",
+                "encoding": song_list_encoding,
+                "text": song_list_plaintext.decode(song_list_encoding, errors="replace"),
+            }
         else:
             song_warnings = []
         manifest = self._build_update_list(files)
         files.append(self._file_info("update.lst", manifest))
+        chart_preview = self.adapter.inspect(built.container, filename=built.filename)
+        chart_preview.update({
+            "root_id": "export-preview",
+            "path": f"rewrite/script_download/{built.filename}",
+        })
         return {
             "valid": True,
             "filename": built.filename,
+            "song_id": built.song_id,
             "slot": built.slot,
             "header": f"0x{built.header:08x}",
             "warnings": list(dict.fromkeys([*built.warnings, *song_warnings])),
@@ -96,6 +113,15 @@ class Pm3ExportService:
             "files": files,
             "target_version": project.metadata.version or "PM3 rewrite overlay",
             "resources": self._resources(project),
+            "previews": {
+                "chart": chart_preview,
+                "update_list": {
+                    "filename": "update.lst",
+                    "encoding": "ascii",
+                    "text": manifest.decode("ascii"),
+                },
+                "song_list": song_list_preview,
+            },
         }
 
     def export(
@@ -105,16 +131,21 @@ class Pm3ExportService:
         *,
         target_id: str = "staging",
         slot: int | None = None,
+        song_id: int | None = None,
         include_song_list: bool = False,
         fail_after_files: int | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             target = self._target(target_id)
-            built = self.adapter.build_with_report(project, difficulty, slot=slot)
+            built = self.adapter.build_with_report(
+                project, difficulty, slot=slot, song_id=song_id,
+            )
             artifacts = {f"rewrite/script_download/{built.filename}": built.container}
             warnings = list(built.warnings)
             if include_song_list:
-                song_list, song_warnings = self._build_song_list(project, difficulty, built)
+                song_list, _, _, song_warnings = self._build_song_list(
+                    project, difficulty, built
+                )
                 artifacts["rewrite/script_download/SongList.enc"] = song_list
                 warnings.extend(song_warnings)
             artifacts["update.lst"] = self._build_update_list([
@@ -277,7 +308,7 @@ class Pm3ExportService:
         project: SongProject,
         difficulty: DifficultyId,
         built: Pm3BuildResult,
-    ) -> tuple[bytes, list[str]]:
+    ) -> tuple[bytes, bytes, str, list[str]]:
         try:
             source = self.workspace.load_song_list_source()
         except Pm3WorkspaceError as exc:
@@ -289,21 +320,25 @@ class Pm3ExportService:
         rows = source["rows"]
         matching = next((row for row in rows if row.filename.lower() == filename.lower()), None)
         source_fields = project.game_specific_data.get("pm3_song_info_raw_fields")
+        class_id = next(
+            (key for key, value in DIFFICULTY_BY_CLASS.items() if value == difficulty), 2
+        )
         if isinstance(source_fields, list) and len(source_fields) == 16:
             fields = [str(value) for value in source_fields]
         elif matching:
             fields = list(matching.raw_fields)
         else:
-            class_id = next((key for key, value in DIFFICULTY_BY_CLASS.items() if value == difficulty), 2)
-            song_id = Pm3Adapter._numeric_song_id(project.metadata.game_song_id) or 0
-            fields = ["12000", "12000", "12000", "0", "0", "0", f"{song_id:03d}", project.metadata.title, project.metadata.artist, str(song_id), "0", "0", "0", str(class_id), str(project.difficulties[difficulty].level), filename]
+            fields = ["12000", "12000", "12000", "0", "0", "0", f"{built.song_id:03d}", project.metadata.title, project.metadata.artist, str(built.song_id), "0", "0", "0", str(class_id), str(project.difficulties[difficulty].level), filename]
         bpm_values = [round(project.timing.initial_bpm * 100), *[round(event.bpm * 100) for event in project.timing.bpm_events]]
         fields[0] = str(round(project.timing.initial_bpm * 100))
         fields[1] = str(min(bpm_values))
         fields[2] = str(max(bpm_values))
         fields[3] = str(max((event.tick for event in parse_chart_text(built.plaintext)[0].events), default=0))
+        fields[6] = f"{built.song_id:03d}"
         fields[7] = project.metadata.title
         fields[8] = project.metadata.artist
+        fields[9] = str(built.song_id)
+        fields[13] = str(class_id)
         fields[14] = str(project.difficulties[difficulty].level)
         fields[15] = filename
         output = StringIO()
@@ -313,7 +348,14 @@ class Pm3ExportService:
         if matching:
             lines[matching.line_number - 1] = new_line
         else:
-            insert_at = next((index for index, line in enumerate(lines) if line.strip().lower() in {"q", "end"}), len(lines))
+            insert_at = next(
+                (
+                    index
+                    for index, line in enumerate(lines)
+                    if line.strip().strip("#- \t").casefold() in {"q", "end", "file end"}
+                ),
+                len(lines),
+            )
             lines.insert(insert_at, new_line)
         try:
             plaintext = ("\r\n".join(lines) + "\r\n").encode(encoding)
@@ -332,7 +374,7 @@ class Pm3ExportService:
         if not any(row.filename.lower() == filename.lower() for row in verified_rows):
             raise Pm3ExportError("SongList 加密后未找到目标谱面记录")
         warnings.extend(verify_warnings)
-        return container, warnings
+        return container, plaintext, encoding, warnings
 
     @staticmethod
     def _build_update_list(files: list[dict[str, Any]]) -> bytes:
@@ -375,6 +417,7 @@ class Pm3ExportService:
             "target_version": project.metadata.version or "PM3 rewrite overlay",
             "target": {key: str(value) for key, value in target.items() if key != "root"} | {"path": str(target["root"])},
             "filename": built.filename,
+            "song_id": built.song_id,
             "slot": built.slot,
             "header": f"0x{built.header:08x}",
             "include_song_list": include_song_list,

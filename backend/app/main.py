@@ -4,6 +4,7 @@ import json
 import mimetypes
 from pathlib import Path
 from urllib.parse import quote
+from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +24,7 @@ from .factory import new_project
 from .models import (
     CreateProjectRequest,
     DifficultyId,
+    KeySoundAsset,
     ProjectSummary,
     SongProject,
     ValidationIssue,
@@ -62,6 +64,7 @@ class Pm3ExportRequest(BaseModel):
     difficulty: DifficultyId = DifficultyId.hard
     target_id: str = "staging"
     slot: int | None = None
+    song_id: int | None = None
     include_song_list: bool = False
 
 
@@ -483,11 +486,12 @@ def create_app(
         project_id: str,
         difficulty: DifficultyId = Query(DifficultyId.hard),
         slot: int | None = Query(None, ge=0, le=9),
+        song_id: int | None = Query(None, ge=0, le=999),
         include_song_list: bool = Query(False),
     ) -> dict[str, object]:
         try:
             return app.state.pm3_export.preview(
-                get_project(project_id), difficulty, slot=slot,
+                get_project(project_id), difficulty, slot=slot, song_id=song_id,
                 include_song_list=include_song_list,
             )
         except (Pm3ExportError, Pm3FormatError, Pm3WorkspaceError, OSError) as exc:
@@ -499,6 +503,7 @@ def create_app(
             return app.state.pm3_export.export(
                 get_project(project_id), request.difficulty,
                 target_id=request.target_id, slot=request.slot,
+                song_id=request.song_id,
                 include_song_list=request.include_song_list,
             )
         except (Pm3ExportError, Pm3FormatError, Pm3WorkspaceError, OSError) as exc:
@@ -569,6 +574,63 @@ def create_app(
             media_type=mimetypes.guess_type(resource.name)[0] or "application/octet-stream",
             headers={"Cache-Control": "private, max-age=3600"},
         )
+
+    @app.post(
+        "/api/projects/{project_id}/key-sounds",
+        response_model=KeySoundAsset,
+        status_code=201,
+    )
+    async def upload_project_key_sound(
+        project_id: str,
+        file: UploadFile = File(...),
+    ) -> KeySoundAsset:
+        get_project(project_id)
+        filename = Path(file.filename or "key-sound").name
+        suffix = Path(filename).suffix.casefold()
+        if suffix not in AUDIO_SUFFIXES:
+            raise HTTPException(status_code=415, detail="Key 音仅支持 WAV、OGG、MP3、FLAC 或 AIFF")
+        payload = await file.read(64 * 1024 * 1024 + 1)
+        if not payload:
+            raise HTTPException(status_code=422, detail="Key 音文件不能为空")
+        if len(payload) > 64 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Key 音文件不得超过 64 MB")
+        asset_id = str(uuid4())
+        relative = f"key-sounds/{asset_id}{suffix}"
+        try:
+            stored_path = app.state.store.save_asset(project_id, relative, payload)
+        except (OSError, ProjectAssetError) as exc:
+            raise HTTPException(status_code=422, detail=f"保存 Key 音失败：{exc}") from exc
+        return KeySoundAsset(
+            id=asset_id,
+            name=Path(filename).stem or "Key 音",
+            filename=filename,
+            source="manual",
+            extensions={
+                "editor": {
+                    "resource": {
+                        "project_id": project_id,
+                        "path": stored_path,
+                        "exists": True,
+                    },
+                },
+            },
+        )
+
+    @app.delete("/api/projects/{project_id}/key-sounds/{asset_id}", status_code=204)
+    def delete_project_key_sound(
+        project_id: str,
+        asset_id: str,
+        path: str = Query(...),
+    ) -> Response:
+        get_project(project_id)
+        expected_prefix = f"key-sounds/{asset_id}."
+        if not path.casefold().startswith(expected_prefix.casefold()):
+            raise HTTPException(status_code=422, detail="只能删除项目内手动上传的 Key 音")
+        try:
+            app.state.store.delete_asset(project_id, path)
+        except (OSError, ProjectNotFoundError, ProjectAssetError) as exc:
+            raise HTTPException(status_code=404, detail="Key 音资源不存在") from exc
+        return Response(status_code=204)
 
     @app.get("/api/projects/{project_id}/bga-resource")
     def project_bga_resource(

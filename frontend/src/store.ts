@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { createDemoProject } from './demo'
 import { migrateLaneSemantics } from './constants'
 import { gridPulseAt, snapPulse } from './timing'
-import type { DifficultyChart, DifficultyId, EditorTool, Lane, Note, SongProject } from './types'
+import type { DifficultyChart, DifficultyId, EditorTool, KeySoundAsset, Lane, Note, SongProject } from './types'
 
 type SaveStatus = 'saved' | 'dirty' | 'saving' | 'error'
 type ProjectTransform = (project: SongProject) => SongProject
@@ -79,6 +79,10 @@ interface EditorState {
   updateTiming: (patch: Partial<SongProject['timing']>) => void
   updateDifficulty: (difficulty: DifficultyId, patch: Partial<DifficultyChart>) => void
   copyDifficulty: (from: DifficultyId, to: DifficultyId) => void
+  addKeySound: (asset: KeySoundAsset) => void
+  updateKeySound: (assetId: string, patch: Partial<Pick<KeySoundAsset, 'name' | 'volume' | 'delay_ms' | 'tags'>>) => void
+  removeKeySound: (assetId: string) => boolean
+  setLaneDefaultKeySound: (laneId: number, assetId: string | null) => void
   toggleLaneMute: (laneId: number) => void
   setLaneColor: (laneId: number, color: string) => void
   setLanePm3Track: (laneId: number, trackId: number | null) => void
@@ -540,6 +544,78 @@ export const useEditorStore = create<EditorState>((set, get) => {
           undo: (project) => apply(project, before),
           redo: (project) => apply(project, after),
         },
+      )
+    },
+    addKeySound: (asset) => {
+      const before = get().project
+      if (before.key_sounds.some((item) => item.id === asset.id)) return
+      const after = { ...before, key_sounds: [...before.key_sounds, clone(asset)] }
+      record(
+        after,
+        projectHistory('key-sound:add', `添加 Key 音 ${asset.name}`, before, after),
+      )
+    },
+    updateKeySound: (assetId, patch) => {
+      const before = get().project
+      const current = before.key_sounds.find((asset) => asset.id === assetId)
+      if (!current) return
+      const safePatch = {
+        ...patch,
+        ...(patch.volume === undefined ? {} : { volume: Math.max(0, Math.min(2, patch.volume)) }),
+        ...(patch.delay_ms === undefined ? {} : { delay_ms: Number.isFinite(patch.delay_ms) ? patch.delay_ms : 0 }),
+      }
+      const updated = { ...current, ...safePatch }
+      if (JSON.stringify(current) === JSON.stringify(updated)) return
+      const after = {
+        ...before,
+        key_sounds: before.key_sounds.map((asset) => asset.id === assetId ? updated : asset),
+      }
+      record(
+        after,
+        {
+          ...projectHistory(`key-sound:update:${assetId}`, `修改 Key 音 ${current.name}`, before, after),
+          merge: true,
+        },
+      )
+    },
+    removeKeySound: (assetId) => {
+      const before = get().project
+      const asset = before.key_sounds.find((item) => item.id === assetId)
+      if (!asset) return false
+      const referencedByLane = before.lanes.some((lane) => lane.default_key_sound_id === assetId)
+      const referencedByNote = Object.values(before.difficulties).some((chart) => (
+        chart.notes.some((note) => note.key_sound_id === assetId)
+      ))
+      if (referencedByLane || referencedByNote) return false
+      const after = {
+        ...before,
+        key_sounds: before.key_sounds.filter((item) => item.id !== assetId),
+      }
+      record(
+        after,
+        projectHistory(`key-sound:remove:${assetId}`, `删除 Key 音 ${asset.name}`, before, after),
+      )
+      return true
+    },
+    setLaneDefaultKeySound: (laneId, assetId) => {
+      const before = get().project
+      if (assetId !== null && !before.key_sounds.some((asset) => asset.id === assetId)) return
+      const lane = before.lanes.find((item) => item.id === laneId)
+      if (!lane || lane.default_key_sound_id === assetId) return
+      const after = {
+        ...before,
+        lanes: before.lanes.map((item) => item.id === laneId
+          ? { ...item, default_key_sound_id: assetId }
+          : item),
+      }
+      record(
+        after,
+        projectHistory(
+          `lane:key-sound:${laneId}`,
+          assetId === null ? `清除 ${lane.display_name} 默认音色` : `设置 ${lane.display_name} 默认音色`,
+          before,
+          after,
+        ),
       )
     },
     toggleLaneMute: (laneId) => {

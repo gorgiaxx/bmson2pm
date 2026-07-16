@@ -1,9 +1,13 @@
 import {
   AlertTriangle,
+  Binary,
   CheckCircle2,
   Download,
   FileArchive,
+  FileText,
   KeyRound,
+  ListMusic,
+  ListOrdered,
   LoaderCircle,
   PackageCheck,
   RotateCcw,
@@ -32,9 +36,18 @@ function sizeLabel(bytes: number): string {
   return `${(bytes / 1024).toFixed(1)} KB`
 }
 
+function initialSongId(project: SongProject): string {
+  const match = project.metadata.game_song_id?.match(/(\d{1,3})/)
+    ?? project.metadata.source_name?.match(/p(\d{1,3})/i)
+  return match ? String(Math.min(999, Number(match[1]))) : '0'
+}
+
+type PreviewTab = 'chart' | 'update_list' | 'song_list'
+
 export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm3ExportDialogProps) {
   const sourceSlot = project.game_specific_data.pm3_slot
   const [slot, setSlot] = useState(typeof sourceSlot === 'number' && sourceSlot >= 0 && sourceSlot <= 9 ? sourceSlot : 0)
+  const [songIdInput, setSongIdInput] = useState(() => initialSongId(project))
   const [targets, setTargets] = useState<Pm3ExportTarget[]>([])
   const [targetId, setTargetId] = useState('staging')
   const [includeSongList, setIncludeSongList] = useState(false)
@@ -42,6 +55,11 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
   const [report, setReport] = useState<Pm3ExportReport | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [previewTab, setPreviewTab] = useState<PreviewTab>('chart')
+  const songId = /^\d{1,3}$/.test(songIdInput) && Number(songIdInput) <= 999
+    ? Number(songIdInput)
+    : null
+  const currentPreview = preview?.song_id === songId ? preview : null
   const selectedTarget = useMemo(
     () => targets.find((target) => target.id === targetId),
     [targetId, targets],
@@ -59,19 +77,27 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
     let cancelled = false
     setPreview(null)
     setError(null)
+    if (songId === null) return () => { cancelled = true }
     const timer = window.setTimeout(() => {
-      void api.pm3ExportPreview(project.id, difficulty, slot, includeSongList)
+      void api.pm3ExportPreview(project.id, difficulty, songId, slot, includeSongList)
         .then((value) => { if (!cancelled) setPreview(value) })
         .catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : 'PM3 预检失败') })
     }, 120)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [difficulty, includeSongList, project.id, slot])
+  }, [difficulty, includeSongList, project.id, slot, songId])
+
+  useEffect(() => {
+    if (!includeSongList && previewTab === 'song_list') setPreviewTab('chart')
+  }, [includeSongList, previewTab])
 
   const submit = async () => {
     setBusy(true)
     setError(null)
     try {
-      const completed = await api.exportPm3(project.id, difficulty, targetId, slot, includeSongList)
+      if (songId === null) return
+      const completed = await api.exportPm3(
+        project.id, difficulty, targetId, songId, slot, includeSongList,
+      )
       setReport(completed)
       onComplete(completed)
     } catch (reason) {
@@ -96,10 +122,10 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
     }
   }
 
-  const stats = report?.stats ?? preview?.stats
-  const files = report?.files ?? preview?.files ?? []
-  const warnings = report?.warnings ?? preview?.warnings ?? []
-  const verified = report?.round_trip.passed ?? preview?.stats.round_trip_verified === true
+  const stats = report?.stats ?? currentPreview?.stats
+  const files = report?.files ?? currentPreview?.files ?? []
+  const warnings = report?.warnings ?? currentPreview?.warnings ?? []
+  const verified = report?.round_trip.passed ?? currentPreview?.stats.round_trip_verified === true
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
@@ -110,7 +136,7 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
           <div>
             <span className="dialog-format"><ShieldCheck size={14} />PM3 DEPLOY</span>
             <h2 id="pm3-export-title">{project.metadata.title}</h2>
-            <p>{project.difficulties[difficulty].display_name} · {preview?.filename ?? `${project.metadata.game_song_id ?? 'p000'}_${difficulty}.enc`}</p>
+            <p>{project.difficulties[difficulty].display_name} · {currentPreview?.filename ?? `p${songId === null ? '---' : String(songId).padStart(3, '0')}_${difficulty}.enc`}</p>
           </div>
           <button type="button" className="icon-button" onClick={onClose} disabled={busy} title="关闭">
             <X size={17} />
@@ -136,7 +162,20 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
                   </select>
                 </label>
                 <label>
-                  <span><KeyRound size={13} />Key slot</span>
+                  <span><ListOrdered size={13} />曲目序号</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="999"
+                    step="1"
+                    value={songIdInput}
+                    onChange={(event) => setSongIdInput(event.target.value)}
+                    aria-invalid={songId === null}
+                    disabled={busy}
+                  />
+                </label>
+                <label>
+                  <span title="由谱面加密 header 选择，与曲目序号无固定关系"><KeyRound size={13} />Key slot</span>
                   <select value={slot} onChange={(event) => setSlot(Number(event.target.value))} disabled={busy}>
                     {Array.from({ length: 10 }, (_, value) => <option key={value} value={value}>Slot {value}</option>)}
                   </select>
@@ -165,8 +204,16 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
                 <code>{file.path}</code><span>{sizeLabel(file.size)}</span><code>{file.md5.slice(0, 12)}</code>
               </div>
             ))}
-            {!preview && !error && <div className="pm3-artifact-loading"><LoaderCircle className="spin" size={15} />正在重建与验证</div>}
+            {!currentPreview && !error && songId !== null && <div className="pm3-artifact-loading"><LoaderCircle className="spin" size={15} />正在重建与验证</div>}
           </section>
+
+          {currentPreview && (
+            <ExportPreview
+              preview={currentPreview}
+              tab={previewTab}
+              onTab={setPreviewTab}
+            />
+          )}
 
           {warnings.length > 0 && (
             <section className="pm3-export-warnings">
@@ -174,7 +221,7 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
               <ul>{warnings.slice(0, 8).map((warning) => <li key={warning}>{warning}</li>)}</ul>
             </section>
           )}
-          {error && <div className="pm3-export-error"><AlertTriangle size={14} /><span>{error}</span></div>}
+          {(error || songId === null) && <div className="pm3-export-error"><AlertTriangle size={14} /><span>{error ?? '曲目序号必须是 0 到 999 的整数'}</span></div>}
         </div>
 
         <footer className="dialog-footer">
@@ -183,7 +230,7 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
             {report && <button type="button" className="button secondary" onClick={() => void api.downloadPm3(report.export_id)}><Download size={14} />下载 ZIP</button>}
             {report?.rollback_available && <button type="button" className="button secondary danger" onClick={() => void rollback()} disabled={busy}><RotateCcw size={14} />回滚</button>}
             {!report && <button type="button" className="button secondary" onClick={onClose} disabled={busy}>取消</button>}
-            {!report && <button type="button" className="button primary" onClick={() => void submit()} disabled={busy || !preview || !!error || !targets.length}>
+            {!report && <button type="button" className="button primary" onClick={() => void submit()} disabled={busy || !currentPreview || !!error || songId === null || !targets.length}>
               {busy ? <LoaderCircle className="spin" size={14} /> : <PackageCheck size={14} />}
               {selectedTarget?.kind === 'deployment' ? '备份并发布' : '生成安全包'}
             </button>}
@@ -191,6 +238,62 @@ export function Pm3ExportDialog({ project, difficulty, onClose, onComplete }: Pm
           </div>
         </footer>
       </section>
+    </div>
+  )
+}
+
+function ExportPreview({
+  preview,
+  tab,
+  onTab,
+}: {
+  preview: Pm3ExportPreview
+  tab: PreviewTab
+  onTab: (tab: PreviewTab) => void
+}) {
+  const chart = preview.previews.chart
+  const songList = preview.previews.song_list
+  return (
+    <section className="pm3-export-preview">
+      <div className="pm3-export-preview-tabs" role="tablist" aria-label="PM3 文件预览">
+        <button type="button" role="tab" aria-selected={tab === 'chart'} className={tab === 'chart' ? 'active' : ''} onClick={() => onTab('chart')}><Binary size={13} />谱面明文</button>
+        <button type="button" role="tab" aria-selected={tab === 'update_list'} className={tab === 'update_list' ? 'active' : ''} onClick={() => onTab('update_list')}><FileText size={13} />update.lst</button>
+        <button type="button" role="tab" aria-selected={tab === 'song_list'} className={tab === 'song_list' ? 'active' : ''} onClick={() => onTab('song_list')} disabled={!songList} title={songList ? '预览加密前 SongList' : '启用 SongList 重建后可预览'}><ListMusic size={13} />SongList 明文</button>
+      </div>
+
+      {tab === 'chart' && (
+        <div className="pm3-chart-inspector pm3-export-chart-inspector">
+          <header>
+            <span className="chart-format"><Binary size={13} />PM3 / SLOT {chart.slot}</span>
+            <h3>{chart.filename}</h3>
+            <p>{chart.path}</p>
+          </header>
+          <div className="pm3-chart-metrics">
+            <span><small>事件</small><strong>{chart.playable_events}</strong></span>
+            <span><small>音符对象</small><strong>{chart.note_objects}</strong></span>
+            <span><small>长音</small><strong>{chart.hold_notes}</strong></span>
+            <span><small>WAV</small><strong>{chart.wav_count}</strong></span>
+          </div>
+          <dl className="pm3-chart-details">
+            <div><dt>容器</dt><dd>ENC</dd></div>
+            <div><dt>Header</dt><dd>{chart.header}</dd></div>
+            <div><dt>明文</dt><dd>{sizeLabel(chart.plain_length)} · {chart.encoding.toUpperCase()}</dd></div>
+            <div><dt>Track</dt><dd>{chart.track_ids.join(', ')}</dd></div>
+          </dl>
+          <pre className="pm3-chart-preview">{chart.text_preview}</pre>
+        </div>
+      )}
+      {tab === 'update_list' && <TextPreview preview={preview.previews.update_list} />}
+      {tab === 'song_list' && songList && <TextPreview preview={songList} />}
+    </section>
+  )
+}
+
+function TextPreview({ preview }: { preview: { filename: string; encoding: string; text: string } }) {
+  return (
+    <div className="pm3-export-text-preview">
+      <header><strong>{preview.filename}</strong><span>{preview.encoding.toUpperCase()}</span></header>
+      <pre>{preview.text}</pre>
     </div>
   )
 }

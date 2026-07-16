@@ -2,6 +2,7 @@ import type {
   BmsImportOptions,
   BmsInspection,
   DifficultyId,
+  KeySoundAsset,
   ProjectSummary,
   Pm3Catalog,
   Pm3ChartInspection,
@@ -73,6 +74,23 @@ export const api = {
     body: JSON.stringify(project),
   }),
 
+  uploadKeySound: (projectId: string, file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return jsonRequest<KeySoundAsset>(`/api/projects/${projectId}/key-sounds`, {
+      method: 'POST',
+      body,
+    })
+  },
+
+  deleteKeySound: async (projectId: string, assetId: string, path: string): Promise<void> => {
+    const query = new URLSearchParams({ path })
+    const response = await fetch(`/api/projects/${projectId}/key-sounds/${assetId}?${query}`, {
+      method: 'DELETE',
+    })
+    if (!response.ok) throw await parseError(response)
+  },
+
   importBmson: (file: File, difficulty: DifficultyId) => {
     const body = new FormData()
     body.append('file', file)
@@ -140,9 +158,16 @@ export const api = {
 
   pm3ExportTargets: () => jsonRequest<Pm3ExportTarget[]>('/api/pm3/export-targets'),
 
-  pm3ExportPreview: (projectId: string, difficulty: DifficultyId, slot: number, includeSongList: boolean) => {
+  pm3ExportPreview: (
+    projectId: string,
+    difficulty: DifficultyId,
+    songId: number,
+    slot: number,
+    includeSongList: boolean,
+  ) => {
     const query = new URLSearchParams({
       difficulty,
+      song_id: String(songId),
       slot: String(slot),
       include_song_list: String(includeSongList),
     })
@@ -153,12 +178,19 @@ export const api = {
     projectId: string,
     difficulty: DifficultyId,
     targetId: string,
+    songId: number,
     slot: number,
     includeSongList: boolean,
   ) => jsonRequest<Pm3ExportReport>(`/api/projects/${projectId}/export/pm3`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ difficulty, target_id: targetId, slot, include_song_list: includeSongList }),
+    body: JSON.stringify({
+      difficulty,
+      target_id: targetId,
+      song_id: songId,
+      slot,
+      include_song_list: includeSongList,
+    }),
   }),
 
   downloadPm3: (exportId: string) => download(

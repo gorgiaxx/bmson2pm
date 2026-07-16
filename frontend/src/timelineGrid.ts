@@ -32,13 +32,9 @@ export function buildTimelineGrid({
   const end = Math.max(start, visibleStart, visibleEnd)
   const safeResolution = Math.max(1, resolution)
   const safeDivisor = Math.max(1, divisor)
-  const explicitBars = [...new Set(
-    barLines
-      .map((line) => Math.round(line.pulse))
-      .filter((pulse) => Number.isFinite(pulse) && pulse >= 0),
-  )].sort((left, right) => left - right)
+  const explicitBars = explicitBarPulses(barLines)
   const bars = explicitBars.length
-    ? explicitBars.map((pulse, index) => ({ pulse, number: index + 1 }))
+    ? extendExplicitBars(explicitBars, end, safeResolution)
     : fallbackBars(start, end, safeResolution)
   const barNumberByPulse = new Map(bars.map((bar) => [bar.pulse, bar.number]))
   const lines = new Map<number, TimelineGridLine>()
@@ -68,6 +64,55 @@ export function buildTimelineGrid({
   }
 
   return [...lines.values()].sort((left, right) => left.pulse - right.pulse)
+}
+
+export function barNumberAtPulse(
+  pulse: number,
+  resolution: number,
+  barLines: BarLine[],
+): number {
+  const safePulse = Number.isFinite(pulse) ? Math.max(0, pulse) : 0
+  const safeResolution = Math.max(1, resolution)
+  const barLength = safeResolution * 4
+  const explicitBars = explicitBarPulses(barLines)
+  if (!explicitBars.length) return Math.floor(safePulse / barLength) + 1
+
+  let low = 0
+  let high = explicitBars.length
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2)
+    if (explicitBars[middle] <= safePulse) low = middle + 1
+    else high = middle
+  }
+  const explicitIndex = Math.max(0, low - 1)
+  if (explicitIndex < explicitBars.length - 1) return explicitIndex + 1
+  return explicitBars.length + Math.floor(
+    (safePulse - explicitBars[explicitIndex]) / barLength,
+  )
+}
+
+function explicitBarPulses(barLines: BarLine[]): number[] {
+  const pulses = [...new Set(
+    barLines
+      .map((line) => Math.round(line.pulse))
+      .filter((pulse) => Number.isFinite(pulse) && pulse >= 0),
+  )].sort((left, right) => left - right)
+  if (pulses.length && pulses[0] !== 0) pulses.unshift(0)
+  return pulses
+}
+
+function extendExplicitBars(pulses: number[], end: number, resolution: number) {
+  const bars = pulses.map((pulse, index) => ({ pulse, number: index + 1 }))
+  const finalExplicitPulse = pulses.at(-1) ?? 0
+  const barLength = resolution * 4
+  const tailCount = Math.max(0, Math.floor((end - finalExplicitPulse) / barLength))
+  for (let offset = 1; offset <= tailCount; offset += 1) {
+    bars.push({
+      pulse: finalExplicitPulse + offset * barLength,
+      number: pulses.length + offset,
+    })
+  }
+  return bars
 }
 
 function fallbackBars(start: number, end: number, resolution: number) {

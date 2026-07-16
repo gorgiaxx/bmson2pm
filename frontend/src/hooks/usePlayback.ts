@@ -11,7 +11,7 @@ const CONTEXT_RESUME_WAIT_MS = 80
 const PM3_SOURCE_PPQN = 12
 const MIN_PRIMARY_BGM_SECONDS = 8
 const DEFAULT_ROLL_DIVISOR = 4
-const ROLL_PREVIEW_RATE = 2
+const ROLL_PREVIEW_RATE = 1.5
 const MAX_ROLL_HITS_PER_NOTE = 2048
 const LANE_FREQUENCIES = [190, 230, 310, 370, 130, 155]
 
@@ -166,11 +166,14 @@ export function mediaPlaybackWindow(
 }
 
 export function keySoundResourceUrl(asset: KeySoundAsset): string | null {
+  const editor = record(asset.extensions?.editor)
+  const editorResource = record(editor?.resource)
   const bms = record(asset.extensions?.bms)
   const bmsResource = record(bms?.resource)
-  if (bmsResource && bmsResource.exists !== false) {
-    const projectId = typeof bmsResource.project_id === 'string' ? bmsResource.project_id : ''
-    const rawPath = typeof bmsResource.path === 'string' ? bmsResource.path : ''
+  const projectResource = editorResource && editorResource.exists !== false ? editorResource : bmsResource
+  if (projectResource && projectResource.exists !== false) {
+    const projectId = typeof projectResource.project_id === 'string' ? projectResource.project_id : ''
+    const rawPath = typeof projectResource.path === 'string' ? projectResource.path : ''
     const path = rawPath.replaceAll('\\', '/')
     if (projectId && path && !path.split('/').includes('..')) {
       const query = new URLSearchParams({ path })
@@ -500,6 +503,26 @@ export function usePlayback(
       setAutoMusicLoading(bmsBgmSchedule.length ? 'BMS 自动音频' : null)
       return
     }
+    const name = asset.name || asset.filename || `BMS WAV ${event.value}`
+    const startTime = event.time + asset.delay_ms / 1000
+    setAutoMusic((current) => {
+      if (
+        current?.eventKey === event.key
+        && current.buffer === buffer
+        && current.name === name
+        && current.startTime === startTime
+        && current.volume === asset.volume
+      ) return current
+      return {
+        assetId: event.assetId,
+        eventKey: event.key,
+        name,
+        buffer,
+        peaks: buildAudioPeaks(buffer),
+        startTime,
+        volume: asset.volume,
+      }
+    })
     setAutoMusicLoading(null)
     return () => { cancelled = true }
   }, [assetsById, bmsBgmSchedule, keySoundStatus.ready, loadDecodedResource, pm3MusicResource])
@@ -853,6 +876,6 @@ export function usePlayback(
     musicStart: effectiveMusic?.startTime ?? 0,
     musicDuration: effectiveMusic?.buffer.duration ?? 0,
     play, pause, stop, seek, beginScrub, scrubTo, endScrub,
-    setSpeed, setLoop, setMusicMuted, triggerLane, triggerNote,
+    setSpeed, setLoop, setMusicMuted, triggerKeySound, triggerLane, triggerNote,
   }
 }
