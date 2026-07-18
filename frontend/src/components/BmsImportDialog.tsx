@@ -1,17 +1,15 @@
 import { AlertTriangle, ArrowRight, FileText, FolderOpen, Image as ImageIcon, LoaderCircle, Music2, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { bmsResourcePath } from '../api'
+import { DEFAULT_LANES } from '../constants'
 import type { BmsImportOptions, BmsInspection } from '../types'
 
 const TEMPLATE_KEY = 'bmson2pm:bms-lane-map'
-const LANES = [
-  { id: 1, name: '鼓面同时击打', color: '#40c4b4' },
-  { id: 2, name: '鼓缘单击', color: '#e96978' },
-  { id: 3, name: '鼓缘同时击打', color: '#62a6e8' },
-  { id: 4, name: '右小鼓', color: '#dc84d8' },
-  { id: 5, name: '左小鼓', color: '#f2aa4f' },
-  { id: 6, name: '鼓面单击', color: '#e9d35b' },
-]
+const LANES = DEFAULT_LANES.map((lane) => ({
+  id: lane.id,
+  name: lane.display_name,
+  color: lane.color,
+}))
 
 interface BmsImportDialogProps {
   inspection: BmsInspection

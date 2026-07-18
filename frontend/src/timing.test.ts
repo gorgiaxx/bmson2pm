@@ -44,7 +44,7 @@ describe('timing conversions', () => {
     chart.notes = chart.notes.slice(0, 4).map((note, index) => ({
       ...note,
       pulse: index * 240,
-      lane_id: [3, 4, 5, 6][index],
+      lane_id: [1, 2, 3, 6][index],
     }))
     const stats = calculateStats(project, chart.notes)
     expect(stats.simultaneousRate).toBe(0.5)

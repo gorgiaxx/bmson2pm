@@ -104,10 +104,57 @@ const uid = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.ran
 const clone = <T,>(value: T): T => structuredClone(value)
 const touched = (project: SongProject): SongProject => ({ ...project, updated_at: new Date().toISOString() })
 
+const LEGACY_INPUT_LANE_MAP: Record<number, number> = {
+  1: 5, 2: 4, 3: 3, 4: 2, 5: 1, 6: 6,
+}
+
+function migrateLegacyInputLaneIds(project: SongProject): void {
+  const lanes = new Map(project.lanes.map((lane) => [lane.id, lane]))
+  const oldCodes: Record<number, Set<string>> = {
+    1: new Set(['small_left']),
+    2: new Set(['small_right']),
+    3: new Set(['rim_simultaneous', 'rim_left']),
+    4: new Set(['rim_single', 'rim_right']),
+    5: new Set(['head_simultaneous', 'head_left']),
+    6: new Set(['head_single', 'head_right']),
+  }
+  const legacy = Object.entries(oldCodes).every(([rawId, codes]) => {
+    const lane = lanes.get(Number(rawId))
+    return lane !== undefined && codes.has(lane.code)
+  })
+  if (!legacy) return
+
+  project.lanes = project.lanes
+    .map((lane) => ({ ...lane, id: LEGACY_INPUT_LANE_MAP[lane.id] ?? lane.id }))
+    .sort((left, right) => left.id - right.id)
+  for (const chart of Object.values(project.difficulties)) {
+    chart.notes = chart.notes.map((note) => ({
+      ...note,
+      lane_id: LEGACY_INPUT_LANE_MAP[note.lane_id] ?? note.lane_id,
+    }))
+  }
+  project.key_sounds = project.key_sounds.map((asset) => ({
+    ...asset,
+    lane_ids: asset.lane_ids.map((laneId) => LEGACY_INPUT_LANE_MAP[laneId] ?? laneId),
+  }))
+  for (const key of ['bms_lane_map', 'notelist_track_map', 'pm3_track_lane_map']) {
+    const mapping = project.game_specific_data[key]
+    if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) continue
+    project.game_specific_data[key] = Object.fromEntries(
+      Object.entries(mapping).map(([source, target]) => {
+        const laneId = Number(target)
+        return [source, Number.isInteger(laneId) ? LEGACY_INPUT_LANE_MAP[laneId] ?? laneId : target]
+      }),
+    )
+  }
+}
+
 function normalizeProject(project: SongProject): SongProject {
   const next = clone(project)
   next.schema_version = '1.3'
+  migrateLegacyInputLaneIds(next)
   next.lanes = migrateLaneSemantics(next.lanes)
+  next.game_specific_data.lane_semantics = 'pm3-six-input-v3'
   next.timing.bar_lines = (next.timing.bar_lines ?? []).map((line, index) => (
     typeof line === 'number'
       ? { id: `legacy-bar-${index}-${line}`, pulse: line, extensions: {} }
@@ -473,7 +520,11 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const state = get()
       const before = noteSnapshots(state.project.difficulties[state.activeDifficulty].notes, state.selectedIds)
       if (!before.length) return
-      const laneMap: Record<number, number> = { 1: 2, 2: 1 }
+      const left = state.project.lanes.find((lane) => lane.code === 'small_left')
+      const right = state.project.lanes.find((lane) => lane.code === 'small_right')
+      const laneMap: Record<number, number> = left && right
+        ? { [left.id]: right.id, [right.id]: left.id }
+        : {}
       const after = before.map((snapshot) => ({
         ...snapshot,
         note: { ...(snapshot.note as Note), lane_id: laneMap[(snapshot.note as Note).lane_id] ?? (snapshot.note as Note).lane_id },

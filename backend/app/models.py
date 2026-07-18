@@ -158,32 +158,53 @@ class SongProject(BaseModel):
 
     @model_validator(mode="after")
     def migrate_legacy_six_input_lanes(self) -> "SongProject":
-        # Lane IDs and PM3 track mapping stay stable. Only the former, incorrect
-        # left/right interpretation of the large drum inputs is migrated.
-        semantics = {
-            1: ("head_simultaneous", "鼓面同时击打", "both", "head_left", "左鼓面"),
-            2: ("rim_single", "鼓缘单击", "either", "rim_right", "右鼓缘"),
-            3: ("rim_simultaneous", "鼓缘同时击打", "both", "rim_left", "左鼓缘"),
-            6: ("head_single", "鼓面单击", "either", "head_right", "右鼓面"),
+        old_to_new = {1: 5, 2: 4, 3: 3, 4: 2, 5: 1, 6: 6}
+        lanes_by_id = {lane.id: lane for lane in self.lanes}
+        old_codes = {
+            1: {"small_left"},
+            2: {"small_right"},
+            3: {"rim_simultaneous", "rim_left"},
+            4: {"rim_single", "rim_right"},
+            5: {"head_simultaneous", "head_left"},
+            6: {"head_single", "head_right"},
         }
-        migrated = False
+        legacy_layout = all(
+            lane_id in lanes_by_id and lanes_by_id[lane_id].code in codes
+            for lane_id, codes in old_codes.items()
+        )
+        if legacy_layout:
+            for lane in self.lanes:
+                lane.id = old_to_new.get(lane.id, lane.id)
+            for chart in self.difficulties.values():
+                for note in chart.notes:
+                    note.lane_id = old_to_new.get(note.lane_id, note.lane_id)
+            for asset in self.key_sounds:
+                asset.lane_ids = [old_to_new.get(lane_id, lane_id) for lane_id in asset.lane_ids]
+            for key in ("bms_lane_map", "notelist_track_map", "pm3_track_lane_map"):
+                mapping = self.game_specific_data.get(key)
+                if isinstance(mapping, dict):
+                    self.game_specific_data[key] = {
+                        source: old_to_new.get(target, target)
+                        if isinstance(target, int) else target
+                        for source, target in mapping.items()
+                    }
+
+        canonical = {
+            1: ("head_simultaneous", "鼓面同时击打", "both"),
+            2: ("rim_single", "鼓缘单击", "either"),
+            3: ("rim_simultaneous", "鼓缘同时击打", "both"),
+            4: ("small_right", "右小鼓", "right"),
+            5: ("small_left", "左小鼓", "left"),
+            6: ("head_single", "鼓面单击", "either"),
+        }
         for lane in self.lanes:
             if lane.id > 6 and lane.kind == "input":
                 lane.kind = "anonymous"
-            definition = semantics.get(lane.id)
-            if not definition:
-                continue
-            code, name, hand, legacy_code, legacy_name = definition
-            if lane.code == legacy_code or lane.display_name == legacy_name:
-                lane.code = code
-                lane.display_name = name
-                lane.hand = hand
-                migrated = True
-        if migrated:
-            self.schema_version = "1.3"
-            self.game_specific_data.setdefault("lane_semantics", "pm3-six-input-v2")
-        elif self.schema_version != "1.3":
-            self.schema_version = "1.3"
+            if lane.id in canonical and lane.kind == "input":
+                lane.code, lane.display_name, lane.hand = canonical[lane.id]
+        self.lanes.sort(key=lambda lane: lane.id)
+        self.schema_version = "1.3"
+        self.game_specific_data["lane_semantics"] = "pm3-six-input-v3"
         return self
 
 

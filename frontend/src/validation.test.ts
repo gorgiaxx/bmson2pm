@@ -25,7 +25,7 @@ describe('PM3 hand-limit validation', () => {
     const project = createDemoProject('both-hands-validation')
     project.difficulties.hard.notes = [
       note('both-rim', 3, 240),
-      note('small-left', 1, 240),
+      note('small-left', 5, 240),
     ]
 
     const issues = validateProjectLocally(project, 'hard')
@@ -43,10 +43,10 @@ describe('PM3 hand-limit validation', () => {
   it('counts distinct Track activations and warns when more than two are active', () => {
     const project = createDemoProject('three-track-validation')
     project.difficulties.hard.notes = [
-      note('small-left-a', 1, 480),
-      note('small-left-layer', 1, 480),
-      note('small-right', 2, 480),
-      note('rim-single', 4, 480),
+      note('small-left-a', 5, 480),
+      note('small-left-layer', 5, 480),
+      note('small-right', 4, 480),
+      note('rim-single', 2, 480),
     ]
 
     const issue = validateProjectLocally(project, 'hard')
@@ -58,9 +58,9 @@ describe('PM3 hand-limit validation', () => {
   it('does not count Hold duration or non-playable notes as extra hands', () => {
     const project = createDemoProject('activation-only-validation')
     project.difficulties.hard.notes = [
-      note('both-head-hold', 5, 0, { length: 480 }),
-      note('inside-hold', 1, 240),
-      note('non-playable', 2, 240, { playable: false }),
+      note('both-head-hold', 1, 0, { length: 480 }),
+      note('inside-hold', 5, 240),
+      note('non-playable', 4, 240, { playable: false }),
     ]
 
     const concurrencyCodes = new Set([

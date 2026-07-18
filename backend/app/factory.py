@@ -42,5 +42,5 @@ def new_project(request: CreateProjectRequest | None = None) -> SongProject:
         timing=TimingMap(initial_bpm=request.initial_bpm),
         lanes=[lane.model_copy(deep=True) for lane in DEFAULT_LANES],
         difficulties=difficulties,
-        game_specific_data={"lane_semantics": "pm3-six-input-v2"},
+        game_specific_data={"lane_semantics": "pm3-six-input-v3"},
     )

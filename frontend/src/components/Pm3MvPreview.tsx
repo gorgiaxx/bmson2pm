@@ -46,6 +46,30 @@ function loadOptions(url: string): Record<string, unknown> {
   }
 }
 
+async function loadPlayer(
+  element: RufflePlayerElement,
+  player: RufflePlayerApi,
+  options: Record<string, unknown>,
+): Promise<void> {
+  let timeout = 0
+  let onLoaded = () => undefined
+  const loaded = new Promise<void>((resolve) => {
+    onLoaded = () => {
+      window.clearTimeout(timeout)
+      resolve()
+    }
+    element.addEventListener('loadeddata', onLoaded, { once: true })
+    timeout = window.setTimeout(resolve, 3000)
+  })
+  try {
+    await player.load(options)
+    await loaded
+  } finally {
+    window.clearTimeout(timeout)
+    element.removeEventListener('loadeddata', onLoaded)
+  }
+}
+
 export function Pm3MvPreview({ projectId, mvId, available }: Pm3MvPreviewProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const elementRef = useRef<RufflePlayerElement | null>(null)
@@ -81,7 +105,7 @@ export function Pm3MvPreview({ projectId, mvId, available }: Pm3MvPreviewProps) 
         apiRef.current = player
         host.appendChild(element)
 
-        await player.load(loadOptions(controllerUrl(projectId)))
+        await loadPlayer(element, player, loadOptions(controllerUrl(projectId)))
         if (cancelled || revision !== reloadRef.current) return
 
         // Scaleform calls global AS2 functions directly. Ruffle can only drive them
@@ -91,7 +115,29 @@ export function Pm3MvPreview({ projectId, mvId, available }: Pm3MvPreviewProps) 
           player.callExternalInterface('MVLoad', mvId)
           setStatus('controller')
         } else {
-          await player.load(loadOptions(
+          // Reusing a player immediately after its first cold Ruffle load can
+          // leave the replacement SWF on a black frame. Mount a fresh player
+          // after probing the controller so the direct preview starts cleanly.
+          player.suspend()
+          element.remove()
+          const directElement = await createPm3MvPlayer()
+          if (cancelled || revision !== reloadRef.current) return
+          directElement.style.width = '100%'
+          directElement.style.height = '100%'
+          const directPlayer = directElement.ruffle()
+          elementRef.current = directElement
+          apiRef.current = directPlayer
+          host.appendChild(directElement)
+
+          await loadPlayer(directElement, directPlayer, loadOptions(
+            mvUrl(projectId, mvId, DEFAULT_MV_STATE, ++stateLoadRef.current),
+          ))
+          if (cancelled || revision !== reloadRef.current) return
+          // The first SWF loaded by a cold WASM runtime can report loadeddata
+          // before its initial frame is painted. A short replay makes it visible.
+          await new Promise((resolve) => window.setTimeout(resolve, 150))
+          if (cancelled || revision !== reloadRef.current) return
+          await loadPlayer(directElement, directPlayer, loadOptions(
             mvUrl(projectId, mvId, DEFAULT_MV_STATE, ++stateLoadRef.current),
           ))
           if (cancelled || revision !== reloadRef.current) return
@@ -116,11 +162,16 @@ export function Pm3MvPreview({ projectId, mvId, available }: Pm3MvPreviewProps) 
 
   const selectState = (next: number) => {
     const player = apiRef.current
-    if (!player || (status !== 'controller' && status !== 'direct')) return
+    const element = elementRef.current
+    if (!player || !element || (status !== 'controller' && status !== 'direct')) return
     if (status === 'controller') {
       player.callExternalInterface('MVState', next)
     } else {
-      void player.load(loadOptions(mvUrl(projectId, mvId, next, ++stateLoadRef.current)))
+      void loadPlayer(
+        element,
+        player,
+        loadOptions(mvUrl(projectId, mvId, next, ++stateLoadRef.current)),
+      )
         .then(() => {
           if (!playing) player.suspend()
         })

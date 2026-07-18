@@ -21,6 +21,45 @@ describe('incremental editor history', () => {
     expect(useEditorStore.getState().project.difficulties.hard.notes).toHaveLength(originalCount + 1)
   })
 
+  it('migrates legacy PM3 lane IDs together with their notes', () => {
+    const project = createDemoProject('legacy-lane-layout')
+    const oldCodes = [
+      ['small_left', '左小鼓', 'left'],
+      ['small_right', '右小鼓', 'right'],
+      ['rim_simultaneous', '鼓缘同时击打', 'both'],
+      ['rim_single', '鼓缘单击', 'either'],
+      ['head_simultaneous', '鼓面同时击打', 'both'],
+      ['head_single', '鼓面单击', 'either'],
+    ] as const
+    project.lanes.forEach((lane, index) => {
+      [lane.code, lane.display_name, lane.hand] = oldCodes[index]
+    })
+    project.game_specific_data = {
+      lane_semantics: 'pm3-six-input-v2',
+      bms_lane_map: { '11': 1, '12': 5 },
+    }
+    const source = project.difficulties.hard.notes[0]
+    project.difficulties.hard.notes = [
+      { ...source, id: 'old-left', lane_id: 1 },
+      { ...source, id: 'old-head', lane_id: 5 },
+    ]
+
+    useEditorStore.getState().setProject(project)
+    const migrated = useEditorStore.getState().project
+
+    expect(migrated.game_specific_data.lane_semantics).toBe('pm3-six-input-v3')
+    expect(migrated.lanes.slice(0, 6).map((lane) => [lane.id, lane.code])).toEqual([
+      [1, 'head_simultaneous'],
+      [2, 'rim_single'],
+      [3, 'rim_simultaneous'],
+      [4, 'small_right'],
+      [5, 'small_left'],
+      [6, 'head_single'],
+    ])
+    expect(migrated.difficulties.hard.notes.map((note) => note.lane_id)).toEqual([5, 1])
+    expect(migrated.game_specific_data.bms_lane_map).toEqual({ '11': 5, '12': 1 })
+  })
+
   it('previews, cancels and commits a drag as one command', () => {
     const note = useEditorStore.getState().project.difficulties.hard.notes[0]
     const originalPulse = note.pulse
@@ -56,13 +95,13 @@ describe('incremental editor history', () => {
     const source = project.difficulties.hard.notes.slice(0, 3).map((note, index) => ({
       ...note,
       id: `mirror-${index}`,
-      lane_id: [1, 3, 5][index],
+      lane_id: [5, 3, 4][index],
     }))
     project.difficulties.hard.notes = source
     state.setProject(project)
     useEditorStore.getState().selectMany(source.map((note) => note.id))
     useEditorStore.getState().mirrorSelected()
-    expect(useEditorStore.getState().project.difficulties.hard.notes.map((note) => note.lane_id)).toEqual([2, 3, 5])
+    expect(useEditorStore.getState().project.difficulties.hard.notes.map((note) => note.lane_id)).toEqual([4, 3, 5])
   })
 
   it('creates an anonymous track, migrates a tick range, and restores it through history', () => {

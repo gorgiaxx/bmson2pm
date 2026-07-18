@@ -58,7 +58,7 @@ export function createDemoProject(id: string = uid()): SongProject {
       })),
     },
     lanes: structuredClone(DEFAULT_LANES), difficulties, audio_assets: [], key_sounds: [],
-    mv_configuration: {}, game_specific_data: { lane_semantics: 'pm3-six-input-v2' }, source_files: [], unknown_data: {},
+    mv_configuration: {}, game_specific_data: { lane_semantics: 'pm3-six-input-v3' }, source_files: [], unknown_data: {},
     version_history: [], created_at: now, updated_at: now,
   }
 }

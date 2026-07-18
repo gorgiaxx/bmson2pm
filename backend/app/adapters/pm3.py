@@ -62,7 +62,7 @@ class Pm3Adapter(ChartFormatAdapter):
     SOURCE_PPQN = 12
     TARGET_PPQN = 24
     PULSE_SCALE = TARGET_PPQN // SOURCE_PPQN
-    TRACK_TO_LANE = {0: 5, 1: 6, 2: 1, 3: 2, 4: 3, 5: 4}
+    TRACK_TO_LANE = {0: 1, 1: 6, 2: 5, 3: 4, 4: 3, 5: 2}
     BACKGROUND_TRACK = 16
     AUXILIARY_COLORS = (
         "#8aa1a8", "#79a9c7", "#a493c7", "#79b59d", "#c49a75", "#b78c9c",
