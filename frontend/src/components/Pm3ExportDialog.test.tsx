@@ -7,6 +7,10 @@ import { createDemoProject } from '../demo'
 import type { Pm3ExportPreview, Pm3ExportReport, Pm3ResourcePackage, Pm3ResourceProfile } from '../types'
 import { Pm3ExportDialog } from './Pm3ExportDialog'
 
+vi.mock('./Pm3MvPreview', () => ({
+  Pm3MvPreview: () => <div data-testid="pm3-mv-preview" />,
+}))
+
 function preview(
   songId: number,
   includeSongList: boolean,
@@ -20,7 +24,11 @@ function preview(
       background: { available: false, source: null, size: null, output_path: `media/sound/BG/BG_${String(songId).padStart(3, '0')}.ogg` },
       preview: { available: false, source: null, size: null, output_path: `media/sound/preview/p${String(songId).padStart(3, '0')}.wav` },
     },
-    mv: { id: 0, available: true, mapping: `StageConfig.MV[${songId}] = 0`, requires_lua_rom_rebuild: profile !== 'squashfs-ota' },
+    mv: {
+      id: 0, custom: false, available: true, source_name: null, output_path: null,
+      inspection: null, mapping: `StageConfig.MV[${songId}] = 0`,
+      requires_lua_rom_rebuild: profile !== 'squashfs-ota',
+    },
     rom: profile === 'squashfs-ota' ? {
       available: true, bundle: 2,
       files: ['ROMS/lua_script.rom', 'ROMS/sound.rom', 'ROMS/SOUND_BG2.rom', 'ROMS/SOUND_PRE2.rom'],
@@ -129,5 +137,54 @@ describe('Pm3ExportDialog', () => {
       project.id, 'hard', 'staging', 43, 0, true, false, 0, 'extracted-media-overlay',
     ))
     await waitFor(() => expect(onComplete).toHaveBeenCalled())
+  })
+
+  it('uploads a custom SWF and selects its MV ID', async () => {
+    const project = createDemoProject('pm3-custom-mv-project')
+    vi.spyOn(api, 'pm3ExportTargets').mockResolvedValue([{
+      id: 'staging', label: '安全导出目录', kind: 'staging', path: '/tmp/exports', backup: false,
+    }])
+    const previewMock = vi.spyOn(api, 'pm3ExportPreview').mockImplementation(
+      async (_projectId, _difficulty, songId, _slot, includeSongList, _resources, mvId, profile) => {
+        const result = preview(songId, includeSongList, profile)
+        result.mv_id = mvId
+        result.resource_package.mv.id = mvId
+        result.resource_package.mv.custom = mvId >= 20
+        result.resource_package.mv.available = true
+        return result
+      },
+    )
+    vi.spyOn(api, 'saveProject').mockResolvedValue(project)
+    const updated = structuredClone(project)
+    updated.mv_configuration.pm3_mv_id = 20
+    updated.game_specific_data.pm3_package = {
+      mv: { id: 20, source_name: 'custom.swf' },
+    }
+    const prepareMv = vi.spyOn(api, 'preparePm3Mv').mockResolvedValue(updated)
+    const onProjectChange = vi.fn()
+    const rendered = render(
+      <Pm3ExportDialog
+        project={project}
+        difficulty="hard"
+        onClose={() => undefined}
+        onComplete={() => undefined}
+        onProjectChange={onProjectChange}
+      />,
+    )
+    const input = rendered.container.querySelector<HTMLInputElement>(
+      'input[accept=".swf,application/x-shockwave-flash"]',
+    )
+    expect(input).not.toBeNull()
+    const file = new File(['FWS-test'], 'custom.swf', {
+      type: 'application/x-shockwave-flash',
+    })
+    fireEvent.change(input as HTMLInputElement, { target: { files: [file] } })
+    fireEvent.click(screen.getByRole('button', { name: '校验并保存 MV' }))
+
+    await waitFor(() => expect(prepareMv).toHaveBeenCalledWith(project.id, file, 20))
+    expect(onProjectChange).toHaveBeenCalledWith(updated)
+    await waitFor(() => expect(previewMock).toHaveBeenCalledWith(
+      project.id, 'hard', 0, 0, false, false, 20, 'extracted-media-overlay',
+    ))
   })
 })

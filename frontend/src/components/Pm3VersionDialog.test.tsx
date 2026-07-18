@@ -154,4 +154,43 @@ describe('Pm3VersionDialog', () => {
       { project_id: 'alpha', difficulty: 'easy', song_id: 42, slot: 2, mv_id: 14 },
     ]))
   })
+
+  it('automatically carries forward and locks charts from the previous version', async () => {
+    const cumulativeCandidates: Pm3VersionCandidate[] = [
+      {
+        ...candidates[0],
+        next_version_name: 'ver011',
+        released: {
+          version_name: 'ver010',
+          song_id: 42,
+          slot: 2,
+          mv_id: 14,
+          difficulties: ['easy'],
+        },
+      },
+      { ...candidates[1], next_version_name: 'ver011' },
+    ]
+    vi.spyOn(api, 'pm3VersionCandidates').mockResolvedValue(cumulativeCandidates)
+    const previewMock = vi.spyOn(api, 'pm3VersionPreview').mockImplementation(
+      async (_versionName, entries) => versionPreview(entries),
+    )
+
+    render(
+      <Pm3VersionDialog
+        currentProjectId="beta"
+        currentDifficulty="hard"
+        onClose={() => undefined}
+        onComplete={() => undefined}
+      />,
+    )
+
+    await waitFor(() => expect(previewMock).toHaveBeenLastCalledWith('ver011', [
+      { project_id: 'alpha', difficulty: 'easy', song_id: 42, slot: 2, mv_id: 14 },
+      { project_id: 'beta', difficulty: 'hard', song_id: 211, slot: 3, mv_id: 18 },
+    ]))
+    expect(screen.getByText('HISTORY')).toBeTruthy()
+    expect((screen.getAllByRole('checkbox', { name: '选择 Alpha' }).at(-1) as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getAllByRole('checkbox', { name: 'Alpha 初级' }).at(-1) as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getAllByRole('spinbutton', { name: 'Alpha 曲目序号' }).at(-1) as HTMLInputElement).disabled).toBe(true)
+  })
 })

@@ -9,11 +9,11 @@ export const DIFFICULTIES: Array<{ id: DifficultyId; name: string; short: string
 ]
 
 export const DEFAULT_LANES: Lane[] = [
-  { id: 1, code: 'small_left', display_name: '左小鼓', color: '#40c4b4', hand: 'left', kind: 'input', default_key_sound_id: null, muted: false, extensions: {} },
-  { id: 2, code: 'small_right', display_name: '右小鼓', color: '#e96978', hand: 'right', kind: 'input', default_key_sound_id: null, muted: false, extensions: {} },
+  { id: 1, code: 'head_simultaneous', display_name: '鼓面同时击打', color: '#f2aa4f', hand: 'both', kind: 'input', default_key_sound_id: null, muted: false, extensions: {} },
+  { id: 2, code: 'rim_single', display_name: '鼓缘单击', color: '#dc84d8', hand: 'either', kind: 'input', default_key_sound_id: null, muted: false, extensions: {} },
   { id: 3, code: 'rim_simultaneous', display_name: '鼓缘同时击打', color: '#62a6e8', hand: 'both', kind: 'input', default_key_sound_id: null, muted: false, extensions: {} },
-  { id: 4, code: 'rim_single', display_name: '鼓缘单击', color: '#dc84d8', hand: 'either', kind: 'input', default_key_sound_id: null, muted: false, extensions: {} },
-  { id: 5, code: 'head_simultaneous', display_name: '鼓面同时击打', color: '#f2aa4f', hand: 'both', kind: 'input', default_key_sound_id: null, muted: false, extensions: {} },
+  { id: 4, code: 'small_left', display_name: '左小鼓', color: '#40c4b4', hand: 'left', kind: 'input', default_key_sound_id: null, muted: false, extensions: {} },
+  { id: 5, code: 'small_right', display_name: '右小鼓', color: '#e96978', hand: 'right', kind: 'input', default_key_sound_id: null, muted: false, extensions: {} },
   { id: 6, code: 'head_single', display_name: '鼓面单击', color: '#e9d35b', hand: 'either', kind: 'input', default_key_sound_id: null, muted: false, extensions: {} },
 ]
 

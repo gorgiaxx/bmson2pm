@@ -47,9 +47,18 @@ PM3 音频生成需要 `ffmpeg`；离线 ROM 构建还需要 `mksquashfs` 与 `u
 - 音乐、Key 音、预览音频和 SWF MV 引用识别，不修改游戏只读源目录
 - PM3 原密文、cut data、明文 token、辅助 Track 与未知行原样保留
 - PM3 完整歌曲音频生成、PowerOn 格式 `update.lst`、SquashFS 音频分包、`sound.rom`
-  符号链接和 `lua_script.rom` MV 映射离线重建
+  符号链接和 `lua_script.rom` MV 映射离线重建；跨格式谱面会自动补齐 Track 16 BGM
+  启动事件，实际使用的自定义 Key 音会转换为 44.1 kHz PCM WAV 并写入 `sound.rom`
+- 自定义 PM3 MV 上传与静态兼容性校验：使用 ID 20..99，接受 656x488、SWF 8/9、
+  AS2 且含 `low/middle/high/full` 状态帧的 SWF；离线版本会累计重建 `ui.rom` 和
+  `ui_mv6.rom`，并回读校验 SWF 内容及控制器加载链接
+- PM3 MV 浏览器预览：内置离线 Ruffle/WASM，内置与项目私有 SWF 走受限同源接口；
+  可切换 `low/middle/high/full`，预览补丁只作用于临时响应，不改动 OTA 原文件
 - PM3 多曲离线版本构建：一次合并多个项目/难度的 SongList、谱面、音频与跨分包 ROM，
-  输出可审计的 `verNNN` 目录和单一 `update.lst`
+  输出可审计的 `verNNN` 目录和单一 `update.lst`；后续版本会自动带入并锁定历史歌曲，
+  强制累计重建共享 ROM 和 SongList，避免新版本移除早期自制歌曲
+- PM3 离线 OTA 只读审计：解析 `update.lst`、逐文件核对 MD5、回读谱面/SongList/ROM，
+  并在内存中模拟多个 `verNNN` 的覆盖、删除与 SongList 变化
 
 PM3 文件级 Track、`BG.wav` 虚拟路径、SquashFS 音频分包和辅助 Track 的实证分析见
 [docs/pm3-chart-track-analysis.md](docs/pm3-chart-track-analysis.md)。
@@ -61,7 +70,8 @@ BMS Key 音资源关联与 AGEHA 实例验证见
 [docs/pm3-offline-ota-analysis.md](docs/pm3-offline-ota-analysis.md)。
 - PM3 明文谱面重建、`.enc` 加密、写后解密重解析与语义 Round-trip
 - rewrite 更新包、`update.lst` MD5 清单、SongList 可选重建、ZIP 与 JSON 导出报告
-- 多曲版本会从同一只读基线重建共享 ROM；不会把多个独立歌曲 ZIP 直接覆盖叠加
+- 多曲版本会从同一只读基线累计重建共享 ROM；界面自动带入并锁定上一版歌曲，不允许后续
+  ZIP 遗漏早期自制歌曲
 - 仅白名单发布目标、发布前备份、原子替换、故障自动恢复与手动回滚
 
 ## 动态 Track 设计
@@ -73,10 +83,16 @@ BMS Key 音资源关联与 AGEHA 实例验证见
 BMS 导出会沿用匿名 Track 的原始 channel；BMSON 与 NoteList 导出也会写出对应的动态 lane/track 索引。PM3 导出要求玩家输入归入 Lane 1–6；其余 Track 必须在右键菜单中显式映射为 PM3 辅助 Track 6..15、17..23。只要当前难度仍有任何事件位于待分类 Track，PM3 预检就会阻止导出，而不是静默跳过；辅助事件写回但不计入 `TotalNote`。
 
 右上角显微镜按钮可打开 PM3 只读研究工作台。受信目录路径写在 `backend/config.toml`（已
-gitignore），从 `config.example.toml` 复制模板后填入真实路径；目前包含 `game`（p3 镜像）与
-`rewrite`（p4 镜像，含 OTA 更新）两个根。cut table 已内置，不再依赖外部 A36 ROM 镜像；
-以上路径仍可用 `BMSON2PM_PM3_GAME_ROOT`、`BMSON2PM_PM3_REWRITE_ROOT` 等同名环境变量覆盖，
-或用 `BMSON2PM_CONFIG` 指向另一个配置文件。API 不接受任意服务器绝对路径。
+gitignore），从 `config.example.toml` 复制模板后填入真实路径；包含 `game`（p3 镜像）、
+`rewrite`（p4 镜像，含 OTA 更新）与可选 `mirror`（原 FTP 本地镜像）三个只读根。cut table
+已内置，不再依赖外部 A36 ROM 镜像；以上路径可用 `BMSON2PM_PM3_GAME_ROOT`、
+`BMSON2PM_PM3_REWRITE_ROOT`、`BMSON2PM_PM3_MIRROR_ROOT` 等同名环境变量覆盖，或用
+`BMSON2PM_CONFIG` 指向另一个配置文件。API 不接受任意服务器绝对路径。
+
+研究工作台的“OTA 审计”页可以审计 `backend/data/pm3-exports` 中的本地导出，也可以按
+generation 扫描配置的 FTP 本地镜像。镜像审计会检查连续 version、累计 edition、路径、
+payload 存在性和可选全量 MD5。它不会执行清单操作、挂载 ROM、连接 FTP/SSH 或修改
+`machine.cfg`/`update.cfg`。
 
 PM3 安全包默认写入 `backend/data/pm3-exports`，可用 `BMSON2PM_PM3_EXPORT_ROOT` 覆盖。
 如需直接发布到测试机的 rewrite 根目录，显式配置 `BMSON2PM_PM3_DEPLOY_ROOT`；未配置时界面只提供安全导出目录。

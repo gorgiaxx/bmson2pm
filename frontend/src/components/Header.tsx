@@ -98,10 +98,10 @@ export function Header({ connected, onImport, onExport, onNewProject, onResearch
         <span className={`connection ${connected ? 'online' : ''}`} title={connected ? 'FastAPI 已连接' : '离线模式'}>
           <i />{connected ? 'API' : 'LOCAL'}
         </span>
-        <button type="button" className="icon-button" onClick={onNewProject} title="新建项目">
+        <button type="button" className="icon-button new-project-button" onClick={onNewProject} title="新建项目">
           <FilePlus2 size={17} />
         </button>
-        <button type="button" className="icon-button" onClick={onResearch} disabled={!connected} title="PM3 只读研究工作台">
+        <button type="button" className="icon-button research-button" onClick={onResearch} disabled={!connected} title="PM3 只读研究工作台">
           <Microscope size={17} />
         </button>
         <input

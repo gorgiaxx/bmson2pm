@@ -20,6 +20,7 @@ class Pm3WorkspaceError(ValueError):
 DEFAULT_ROOTS = {
     "game": "游戏只读目录",
     "rewrite": "下载覆盖目录",
+    "mirror": "原 FTP 本地镜像",
 }
 
 

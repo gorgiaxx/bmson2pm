@@ -30,6 +30,7 @@ interface Pm3VersionDialogProps {
 
 interface VersionRow extends Omit<Pm3VersionEntry, 'difficulty'> {
   difficulties: DifficultyId[]
+  lockedDifficulties: DifficultyId[]
 }
 
 const MV_IDS = Array.from({ length: 20 }, (_, value) => value).filter((value) => value !== 17)
@@ -48,7 +49,7 @@ function initialRows(
   const used = new Set<number>()
   let nextSongId = 211
   return candidates.map((candidate) => {
-    let songId = candidate.song_id
+    let songId = candidate.released?.song_id ?? candidate.song_id
     if (songId === null || used.has(songId)) {
       while (used.has(nextSongId) && nextSongId <= 999) nextSongId += 1
       songId = Math.min(999, nextSongId)
@@ -56,16 +57,23 @@ function initialRows(
     }
     used.add(songId)
     const difficultyIds = candidate.difficulties.map((item) => item.id)
-    const selectedDifficulties = candidate.project_id === currentProjectId
+    const lockedDifficulties = (candidate.released?.difficulties ?? [])
+      .filter((item) => difficultyIds.includes(item))
+    const currentDifficulties = candidate.project_id === currentProjectId
       ? [currentDifficulty, ...difficultyIds.filter((item) => item !== currentDifficulty)]
         .filter((item) => difficultyIds.includes(item))
       : []
+    const selectedDifficulties = [...new Set([
+      ...lockedDifficulties,
+      ...currentDifficulties,
+    ])]
     return {
       project_id: candidate.project_id,
       difficulties: selectedDifficulties,
-      song_id: songId,
-      slot: candidate.slot,
-      mv_id: candidate.mv_id,
+      lockedDifficulties,
+      song_id: candidate.released?.song_id ?? songId,
+      slot: candidate.released?.slot ?? candidate.slot,
+      mv_id: candidate.released?.mv_id ?? candidate.mv_id,
     }
   })
 }
@@ -117,6 +125,8 @@ export function Pm3VersionDialog({
         if (cancelled) return
         setCandidates(items)
         setRows(initialRows(items, currentProjectId, currentDifficulty))
+        const suggested = items.find((item) => item.next_version_name)?.next_version_name
+        if (suggested) setVersionName(suggested)
       })
       .catch((reason) => {
         if (!cancelled) setError(reason instanceof Error ? reason.message : '无法读取版本候选曲目')
@@ -150,7 +160,9 @@ export function Pm3VersionDialog({
       if (row.project_id !== projectId) return row
       const difficulties = selected
         ? [...new Set([...row.difficulties, difficulty])]
-        : row.difficulties.filter((item) => item !== difficulty)
+        : row.lockedDifficulties.includes(difficulty)
+          ? row.difficulties
+          : row.difficulties.filter((item) => item !== difficulty)
       return { ...row, difficulties }
     }))
   }
@@ -226,6 +238,9 @@ export function Pm3VersionDialog({
                   const row = rows.find((item) => item.project_id === candidate.project_id)
                   if (!row) return null
                   const enabled = row.difficulties.length > 0
+                  const mvIds = candidate.mv_id >= 20 && !MV_IDS.includes(candidate.mv_id)
+                    ? [...MV_IDS, candidate.mv_id]
+                    : MV_IDS
                   return (
                     <div className={`pm3-version-row ${enabled ? 'selected' : ''}`} role="row" key={candidate.project_id}>
                       <label className="pm3-version-song">
@@ -235,9 +250,9 @@ export function Pm3VersionDialog({
                           onChange={(event) => updateRow(candidate.project_id, {
                             difficulties: event.target.checked
                               ? candidate.difficulties.map((item) => item.id)
-                              : [],
+                              : row.lockedDifficulties,
                           })}
-                          disabled={busy || !candidate.difficulties.length}
+                          disabled={busy || !candidate.difficulties.length || row.lockedDifficulties.length > 0}
                           aria-label={`选择 ${candidate.title}`}
                         />
                         <span><strong>{candidate.title}</strong><small>{candidate.artist}</small></span>
@@ -251,7 +266,7 @@ export function Pm3VersionDialog({
                                 type="checkbox"
                                 checked={row.difficulties.includes(difficulty.id)}
                                 onChange={(event) => toggleDifficulty(candidate.project_id, difficulty.id, event.target.checked)}
-                                disabled={busy}
+                                disabled={busy || row.lockedDifficulties.includes(difficulty.id)}
                                 aria-label={`${candidate.title} ${difficulty.label}`}
                               />
                               {difficulty.id.slice(0, 2).toUpperCase()}
@@ -264,7 +279,7 @@ export function Pm3VersionDialog({
                         <input
                           type="number" min="0" max="999" step="1" value={row.song_id}
                           onChange={(event) => updateRow(candidate.project_id, { song_id: Number(event.target.value) })}
-                          disabled={busy || !enabled}
+                          disabled={busy || !enabled || row.lockedDifficulties.length > 0}
                           aria-label={`${candidate.title} 曲目序号`}
                         />
                       </label>
@@ -273,7 +288,7 @@ export function Pm3VersionDialog({
                         <select
                           value={row.slot}
                           onChange={(event) => updateRow(candidate.project_id, { slot: Number(event.target.value) })}
-                          disabled={busy || !enabled}
+                          disabled={busy || !enabled || row.lockedDifficulties.length > 0}
                           aria-label={`${candidate.title} Key slot`}
                         >
                           {Array.from({ length: 10 }, (_, value) => <option value={value} key={value}>{value}</option>)}
@@ -284,14 +299,18 @@ export function Pm3VersionDialog({
                         <select
                           value={row.mv_id}
                           onChange={(event) => updateRow(candidate.project_id, { mv_id: Number(event.target.value) })}
-                          disabled={busy || !enabled}
+                          disabled={busy || !enabled || row.lockedDifficulties.length > 0}
                           aria-label={`${candidate.title} MV`}
                         >
-                          {MV_IDS.map((value) => <option value={value} key={value}>{value}</option>)}
+                          {mvIds.map((value) => (
+                            <option value={value} key={value}>
+                              {value}{value >= 20 ? ' · CUSTOM' : ''}
+                            </option>
+                          ))}
                         </select>
                       </label>
                       <span className={`pm3-version-ready ${candidate.audio_ready ? 'ready' : ''}`}>
-                        <i />{candidate.audio_ready ? 'AUDIO' : 'MISSING'}
+                        <i />{row.lockedDifficulties.length ? 'HISTORY' : candidate.audio_ready ? 'AUDIO' : 'MISSING'}
                       </span>
                     </div>
                   )

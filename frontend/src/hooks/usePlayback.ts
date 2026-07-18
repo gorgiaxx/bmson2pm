@@ -8,6 +8,7 @@ const SCHEDULER_INTERVAL_MS = 25
 const DECODED_AUDIO_CACHE_BYTES = 256 * 1024 * 1024
 const PRELOAD_WORKERS = 8
 const CONTEXT_RESUME_WAIT_MS = 80
+const LANE_MUTE_RAMP_SECONDS = 0.012
 const PM3_SOURCE_PPQN = 12
 const MIN_PRIMARY_BGM_SECONDS = 8
 const DEFAULT_ROLL_DIVISOR = 4
@@ -274,6 +275,8 @@ export function usePlayback(
   const [autoMusicLoading, setAutoMusicLoading] = useState<string | null>(null)
   const contextRef = useRef<AudioContext | null>(null)
   const musicBusRef = useRef<GainNode | null>(null)
+  const laneBusRefs = useRef(new Map<number, GainNode>())
+  const laneMuteRef = useRef(new Map(project.lanes.map((lane) => [lane.id, lane.muted])))
   const startClockRef = useRef(0)
   const startPositionRef = useRef(0)
   const positionRef = useRef(0)
@@ -337,6 +340,8 @@ export function usePlayback(
     if (contextRef.current?.state === 'closed') {
       contextRef.current = null
       musicBusRef.current = null
+      for (const bus of laneBusRefs.current.values()) bus.disconnect()
+      laneBusRefs.current.clear()
     }
     if (!contextRef.current && typeof AudioContext !== 'undefined') {
       contextRef.current = new AudioContext({ latencyHint: 'interactive' })
@@ -355,6 +360,37 @@ export function usePlayback(
     }
     return musicBusRef.current
   }, [context])
+
+  const laneBus = useCallback((laneId: number): GainNode | null => {
+    const ctx = context()
+    if (!ctx) return null
+    const existing = laneBusRefs.current.get(laneId)
+    if (existing) return existing
+    const gain = ctx.createGain()
+    gain.gain.value = laneMuteRef.current.get(laneId) ? 0 : 1
+    gain.connect(ctx.destination)
+    laneBusRefs.current.set(laneId, gain)
+    return gain
+  }, [context])
+
+  useEffect(() => {
+    laneMuteRef.current = new Map(project.lanes.map((lane) => [lane.id, lane.muted]))
+    const ctx = contextRef.current
+    for (const [laneId, bus] of laneBusRefs.current) {
+      if (!laneMuteRef.current.has(laneId)) {
+        bus.disconnect()
+        laneBusRefs.current.delete(laneId)
+        continue
+      }
+      if (!ctx || ctx.state === 'closed') continue
+      bus.gain.cancelScheduledValues(ctx.currentTime)
+      bus.gain.setTargetAtTime(
+        laneMuteRef.current.get(laneId) ? 0 : 1,
+        ctx.currentTime,
+        LANE_MUTE_RAMP_SECONDS,
+      )
+    }
+  }, [project.lanes])
 
   const loadDecodedResource = useCallback(async (url: string): Promise<AudioBuffer> => {
     const cached = decodedResourceCacheRef.current.get(url)
@@ -565,7 +601,8 @@ export function usePlayback(
 
   const triggerFallback = useCallback((laneId: number, at?: number, volume = 0.55) => {
     const ctx = context()
-    if (!ctx) return
+    const bus = laneBus(laneId)
+    if (!ctx || !bus) return
     if (ctx.state === 'suspended') void resumeContext()
     const start = Math.max(ctx.currentTime, at ?? ctx.currentTime)
     const oscillator = ctx.createOscillator()
@@ -575,12 +612,17 @@ export function usePlayback(
     oscillator.frequency.exponentialRampToValueAtTime(70, start + 0.07)
     gain.gain.setValueAtTime(Math.max(0.001, volume), start)
     gain.gain.exponentialRampToValueAtTime(0.001, start + 0.09)
-    oscillator.connect(gain).connect(ctx.destination)
+    oscillator.connect(gain).connect(bus)
     oscillator.start(start)
     oscillator.stop(start + 0.1)
-  }, [context, resumeContext])
+  }, [context, laneBus, resumeContext])
 
-  const triggerKeySound = useCallback((assetId: string, at?: number, volume = 0.72) => {
+  const triggerKeySound = useCallback((
+    assetId: string,
+    at?: number,
+    volume = 0.72,
+    laneId?: number,
+  ) => {
     const buffer = keySoundBuffersRef.current.get(assetId)
     const asset = assetsById.get(assetId)
     if (!buffer || !asset) return false
@@ -594,12 +636,14 @@ export function usePlayback(
     source.buffer = buffer
     source.playbackRate.value = speedRef.current
     gain.gain.value = Math.max(0, Math.min(2, volume * asset.volume))
-    source.connect(gain).connect(ctx.destination)
+    const output = laneId === undefined ? ctx.destination : laneBus(laneId)
+    if (!output) return false
+    source.connect(gain).connect(output)
     keySoundSourcesRef.current.add(source)
     source.onended = () => keySoundSourcesRef.current.delete(source)
     source.start(start)
     return true
-  }, [assetsById, context, resumeContext])
+  }, [assetsById, context, laneBus, resumeContext])
 
   const triggerBgm = useCallback((assetId: string, at: number, offset: number) => {
     const buffer = keySoundBuffersRef.current.get(assetId)
@@ -621,13 +665,13 @@ export function usePlayback(
 
   const triggerLane = useCallback((laneId: number, at?: number, volume = 0.72) => {
     const assetId = laneKeySounds.get(laneId)
-    if (assetId && triggerKeySound(assetId, at, volume)) return
+    if (assetId && triggerKeySound(assetId, at, volume, laneId)) return
     triggerFallback(laneId, at, volume * 0.75)
   }, [laneKeySounds, triggerFallback, triggerKeySound])
 
   const triggerNote = useCallback((note: Note, at?: number, volume = note.volume * 0.72) => {
     const assetId = note.key_sound_id ?? laneKeySounds.get(note.lane_id)
-    if (assetId && triggerKeySound(assetId, at, volume)) return
+    if (assetId && triggerKeySound(assetId, at, volume, note.lane_id)) return
     triggerFallback(note.lane_id, at, volume * 0.75)
   }, [laneKeySounds, triggerFallback, triggerKeySound])
 
@@ -698,7 +742,6 @@ export function usePlayback(
     if (!ctx) return
     const nowPosition = currentPosition()
     const horizon = nowPosition + LOOKAHEAD_SECONDS * speedRef.current
-    const laneMute = new Map(project.lanes.map((lane) => [lane.id, lane.muted]))
     let low = 0
     let high = noteSchedule.length
     const earliest = nowPosition - 0.02
@@ -710,7 +753,7 @@ export function usePlayback(
     for (let index = low; index < noteSchedule.length; index += 1) {
       const { key, note, time: noteTime } = noteSchedule[index]
       if (noteTime > horizon) break
-      if (scheduledRef.current.has(key) || laneMute.get(note.lane_id)) continue
+      if (scheduledRef.current.has(key) || laneMuteRef.current.get(note.lane_id)) continue
       const audioTime = ctx.currentTime + Math.max(0, (noteTime - nowPosition) / speedRef.current)
       triggerNote(note, audioTime)
       scheduledRef.current.add(key)
@@ -735,7 +778,7 @@ export function usePlayback(
       const audioTime = ctx.currentTime + Math.max(0, (eventTime - nowPosition) / speedRef.current)
       if (triggerBgm(event.assetId, audioTime, offset)) scheduledRef.current.add(event.key)
     }
-  }, [assetsById, autoMusic?.eventKey, bmsBgmSchedule, context, currentPosition, manualAudioBuffer, noteSchedule, project.lanes, project.timing.audio_offset_ms, triggerBgm, triggerNote])
+  }, [assetsById, autoMusic?.eventKey, bmsBgmSchedule, context, currentPosition, manualAudioBuffer, noteSchedule, project.timing.audio_offset_ms, triggerBgm, triggerNote])
 
   useEffect(() => {
     if (!playingRef.current) return
@@ -871,6 +914,8 @@ export function usePlayback(
     stopBgmSounds()
     musicBusRef.current?.disconnect()
     musicBusRef.current = null
+    for (const bus of laneBusRefs.current.values()) bus.disconnect()
+    laneBusRefs.current.clear()
     keySoundBuffersRef.current.clear()
     keySoundBufferUrlsRef.current.clear()
     decodedResourceCacheRef.current.clear()

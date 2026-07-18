@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDemoProject } from '../demo'
 import type { KeySoundAsset } from '../types'
@@ -217,6 +217,106 @@ describe('low-latency preload planning', () => {
     )
     expect(resource?.startTime).toBeCloseTo(0.5)
     expect(resource?.volume).toBeCloseTo(64 / 127)
+  })
+})
+
+describe('live lane mute', () => {
+  it('updates the lane audio bus without pausing playback', async () => {
+    const project = createDemoProject('live-mute-project')
+    const laneId = project.lanes[0].id
+    project.metadata.audio_duration = 30
+    project.key_sounds = [{
+      ...asset('media/sound/note/live.wav'),
+      id: 'live-key',
+      lane_ids: [laneId],
+    }]
+    project.lanes = project.lanes.map((lane) => lane.id === laneId
+      ? { ...lane, default_key_sound_id: 'live-key', muted: false }
+      : lane)
+    project.difficulties.hard.notes = []
+
+    const destination = {} as AudioDestinationNode
+    const gains: Array<{
+      gain: {
+        value: number
+        cancelScheduledValues: ReturnType<typeof vi.fn>
+        setTargetAtTime: ReturnType<typeof vi.fn>
+      }
+      output: AudioNode | null
+      disconnect: ReturnType<typeof vi.fn>
+    }> = []
+    class FakeAudioContext {
+      state: AudioContextState = 'running'
+      currentTime = 0
+      sampleRate = 48_000
+      destination = destination
+      decodeAudioData = vi.fn(async () => ({
+        duration: 1,
+        length: 48_000,
+        numberOfChannels: 1,
+      } as AudioBuffer))
+      createBuffer = vi.fn(() => ({ duration: 0, length: 1, numberOfChannels: 1 } as AudioBuffer))
+      createBufferSource = vi.fn(() => ({
+        buffer: null,
+        playbackRate: { value: 1 },
+        onended: null,
+        connect: vi.fn((output: AudioNode) => output),
+        start: vi.fn(),
+        stop: vi.fn(),
+      } as unknown as AudioBufferSourceNode))
+      createGain = vi.fn(() => {
+        const node = {
+          gain: {
+            value: 1,
+            cancelScheduledValues: vi.fn(),
+            setTargetAtTime: vi.fn(),
+          },
+          output: null as AudioNode | null,
+          connect: vi.fn((output: AudioNode) => {
+            node.output = output
+            return output
+          }),
+          disconnect: vi.fn(),
+        }
+        gains.push(node)
+        return node as unknown as GainNode
+      })
+      close = vi.fn(async () => { this.state = 'closed' })
+    }
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      arrayBuffer: async () => new ArrayBuffer(8),
+    } as Response)))
+
+    const { result, rerender, unmount } = renderHook(
+      ({ currentProject }) => usePlayback(currentProject, 'hard', null),
+      { initialProps: { currentProject: project } },
+    )
+    await waitFor(() => expect(result.current.keySoundStatus.ready).toBe(1))
+    await act(async () => { await result.current.play() })
+    act(() => result.current.triggerLane(laneId))
+
+    const laneGain = gains.find((gain) => gain.output === destination)
+    expect(laneGain?.gain.value).toBe(1)
+    expect(result.current.playing).toBe(true)
+
+    const mutedProject = {
+      ...project,
+      lanes: project.lanes.map((lane) => lane.id === laneId ? { ...lane, muted: true } : lane),
+    }
+    rerender({ currentProject: mutedProject })
+    await waitFor(() => expect(laneGain?.gain.setTargetAtTime).toHaveBeenLastCalledWith(0, 0, 0.012))
+    expect(result.current.playing).toBe(true)
+
+    const unmutedProject = {
+      ...mutedProject,
+      lanes: mutedProject.lanes.map((lane) => lane.id === laneId ? { ...lane, muted: false } : lane),
+    }
+    rerender({ currentProject: unmutedProject })
+    await waitFor(() => expect(laneGain?.gain.setTargetAtTime).toHaveBeenLastCalledWith(1, 0, 0.012))
+    expect(result.current.playing).toBe(true)
+    unmount()
   })
 })
 

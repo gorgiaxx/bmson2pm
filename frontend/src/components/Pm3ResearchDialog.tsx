@@ -17,11 +17,13 @@ import {
   PanelRight,
   RefreshCw,
   Search,
+  ShieldCheck,
   TriangleAlert,
   X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
+import { Pm3OtaAuditView } from './Pm3OtaAuditView'
 import type {
   DifficultyId,
   Pm3Catalog,
@@ -36,7 +38,7 @@ import type {
   SongProject,
 } from '../types'
 
-type ResearchTab = 'catalog' | 'files' | 'compare'
+type ResearchTab = 'catalog' | 'files' | 'compare' | 'audit'
 type ViewerTab = 'hex' | 'text' | 'chart'
 
 interface Pm3ResearchDialogProps {
@@ -273,6 +275,9 @@ export function Pm3ResearchDialog({ difficulty, onClose, onImported }: Pm3Resear
             <button type="button" className={tab === 'compare' ? 'active' : ''} onClick={() => setTab('compare')}>
               <GitCompareArrows size={15} />比较
             </button>
+            <button type="button" className={tab === 'audit' ? 'active' : ''} onClick={() => setTab('audit')}>
+              <ShieldCheck size={15} />OTA 审计
+            </button>
           </nav>
           <div className="pm3-header-actions">
             {loading && <LoaderCircle className="spin" size={15} />}
@@ -396,15 +401,17 @@ export function Pm3ResearchDialog({ difficulty, onClose, onImported }: Pm3Resear
               {diff ? <DiffViewer diff={diff} /> : <div className="pm3-empty"><GitCompareArrows size={28} /><span>等待左右文件</span></div>}
             </div>
           )}
+
+          {tab === 'audit' && <Pm3OtaAuditView />}
         </div>
 
         <footer className="pm3-research-footer">
-          <span>{tab === 'files' ? `${rootId}:${listing?.path || '/'}` : tab === 'catalog' && selectedRecord && chartInspection ? `${chartInspection.filename} · SLOT ${chartInspection.slot}` : 'PM3 RESEARCH'}</span>
+          <span>{tab === 'files' ? `${rootId}:${listing?.path || '/'}` : tab === 'catalog' && selectedRecord && chartInspection ? `${chartInspection.filename} · SLOT ${chartInspection.slot}` : tab === 'audit' ? 'LOCAL OTA SIMULATION · NO HOST WRITE' : 'PM3 RESEARCH'}</span>
           <div>
             <button type="button" className="button secondary" onClick={onClose} disabled={importing}>关闭</button>
-            <button type="button" className="button primary" onClick={() => void importChart()} disabled={!importSource || importing}>
+            {tab !== 'audit' && <button type="button" className="button primary" onClick={() => void importChart()} disabled={!importSource || importing}>
               {importing ? <LoaderCircle className="spin" size={15} /> : <Import size={15} />}导入谱面
-            </button>
+            </button>}
           </div>
         </footer>
       </section>

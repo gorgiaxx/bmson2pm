@@ -364,7 +364,23 @@ export interface Pm3ResourcePackage {
   }
   mv: {
     id: number
+    custom: boolean
     available: boolean
+    source_name: string | null
+    output_path: string | null
+    inspection: {
+      signature: string
+      version: number
+      width: number
+      height: number
+      frame_rate: number
+      frame_count: number
+      labels: string[]
+      size: number
+      sha256: string
+      as2_compatible: boolean
+    } | null
+    error?: string
     mapping: string
     requires_lua_rom_rebuild: boolean
   }
@@ -448,6 +464,14 @@ export interface Pm3VersionCandidate {
     background: Omit<Pm3ResourceStatus, 'output_path'>
     preview: Omit<Pm3ResourceStatus, 'output_path'>
   }
+  released?: {
+    version_name: string
+    song_id: number
+    slot: number
+    mv_id: number
+    difficulties: DifficultyId[]
+  } | null
+  next_version_name?: string
   updated_at: string
 }
 
@@ -480,6 +504,14 @@ export interface Pm3VersionSong {
 export interface Pm3VersionPreview {
   valid: boolean
   version_name: string
+  cumulative?: boolean
+  lineage?: {
+    cumulative: boolean
+    base_export_id: string | null
+    base_version_name: string | null
+    required_song_count: number
+    required_chart_count: number
+  }
   songs: Pm3VersionSong[]
   stats: {
     song_count: number
@@ -488,6 +520,8 @@ export interface Pm3VersionPreview {
     bundles: number[]
     note_objects: number
     event_count: number
+    custom_key_sound_count?: number
+    custom_mv_count?: number
   }
   rom: {
     available: boolean
@@ -513,6 +547,8 @@ export interface Pm3VersionReport {
   created_at: string
   filename: string
   version_name: string
+  cumulative?: boolean
+  lineage?: Pm3VersionPreview['lineage']
   target_version: string
   target: { id: string; label: string; kind: string; path: string }
   songs: Pm3VersionSong[]
@@ -524,4 +560,207 @@ export interface Pm3VersionReport {
   files: Pm3ExportFile[]
   warnings: string[]
   rollback_available: false
+}
+
+export interface Pm3ExportSummary {
+  export_id: string
+  status: string
+  created_at: string
+  filename: string
+  version_name?: string
+  kind?: string
+  title?: string
+  resource_profile?: Pm3ResourceProfile
+}
+
+export interface Pm3OtaBaselineStatus {
+  status: 'present' | 'missing' | 'unavailable'
+  root_id: string | null
+  path: string | null
+  size: number | null
+}
+
+export interface Pm3OtaAuditOperation {
+  line: number
+  action: 'r' | 'd'
+  path: string
+  expected_md5: string | null
+  actual_md5: string | null
+  size: number | null
+  verified: boolean
+  format: 'song-list' | 'chart' | 'squashfs' | 'binary'
+  format_valid: boolean | null
+  format_detail?: string
+  baseline: Pm3OtaBaselineStatus
+  effect: 'replace' | 'create' | 'delete' | 'noop' | 'unknown'
+}
+
+export interface Pm3OtaAudit {
+  export_id: string
+  version_name: string
+  kind: string
+  created_at: string | null
+  valid: boolean
+  read_only: true
+  activation_timestamp: number
+  activation_time: string | null
+  operation_count: number
+  counts: {
+    replace: number
+    create: number
+    delete: number
+    noop: number
+    unknown: number
+    verified: number
+  }
+  operations: Pm3OtaAuditOperation[]
+  song_list: null | {
+    valid: boolean
+    encoding?: string
+    row_count?: number
+    file_end_line?: number | null
+    rows_after_end?: string[]
+    filenames: string[]
+    warnings?: string[]
+    error?: string
+  }
+  rom: { count: number; valid: boolean; paths: string[] }
+  unmanaged_files: string[]
+  unmanaged_count: number
+  errors: string[]
+  warnings: string[]
+}
+
+export interface Pm3OtaChain {
+  valid: boolean
+  read_only: true
+  export_ids: string[]
+  versions: Array<{
+    export_id: string
+    version_name: string
+    valid: boolean
+    operation_count: number
+  }>
+  counts: {
+    versions: number
+    operations: number
+    overrides: number
+    deletes: number
+    final_files: number
+  }
+  transitions: Array<{
+    order: number
+    export_id: string
+    version_name: string
+    path: string
+    change: 'unchanged' | 'deleted' | 'restored' | 'create' | 'replace' | 'unknown' | 'overridden'
+    before_md5: string | null
+    after_md5: string | null
+  }>
+  song_list_changes: Array<{
+    export_id: string
+    version_name: string
+    added: string[]
+    removed: string[]
+  }>
+  errors: string[]
+  warnings: string[]
+}
+
+export interface Pm3OtaMirrorOptions {
+  generation?: number
+  installedVersion?: number
+  installedEdition?: number
+  downloadedVersion?: number
+  downloadedEdition?: number
+  verifyPayloads?: boolean
+}
+
+export interface Pm3OtaMirrorPackage {
+  name: string
+  kind: 'version' | 'edition'
+  version: number
+  edition: number
+  timestamp: number | null
+  activation_time: string | null
+  due: boolean | null
+  operation_count: number
+  counts: {
+    replace: number
+    add: number
+    delete: number
+    verified_payloads: number
+    missing_payloads: number
+    md5_mismatches: number
+    unmanaged_files: number
+  }
+  mismatches: Array<{
+    path: string
+    expected_md5: string
+    actual_md5: string
+  }>
+  missing_payloads: string[]
+  unmanaged_files: string[]
+  planned: boolean
+  cumulative: boolean | null
+  valid: boolean
+  errors: string[]
+  warnings: string[]
+}
+
+export interface Pm3OtaMirrorAudit {
+  valid: boolean
+  read_only: true
+  verify_payloads: boolean
+  integrity_verified: boolean
+  root: string
+  patch_root: string
+  generation: number
+  installed: { version: number; edition: number }
+  downloaded: { version: number; edition: number }
+  config: {
+    machine: null | { generation: number; version: number; edition: number; area: number }
+    update: null | { version: number; edition: number }
+  }
+  available: {
+    versions: number[]
+    editions: Record<string, number[]>
+    catalog_version_gaps: number[]
+  }
+  plan: {
+    valid: boolean
+    version_steps: string[]
+    edition_step: string | null
+    steps: string[]
+    missing_versions: number[]
+    errors: string[]
+  }
+  edition_chains: Array<{
+    version: number
+    editions: number[]
+    cumulative: boolean
+    breaks: Array<{
+      previous: string
+      current: string
+      missing_count: number
+      missing_paths: string[]
+    }>
+  }>
+  counts: {
+    packages: number
+    versions: number
+    editions: number
+    operations: number
+    replace: number
+    add: number
+    delete: number
+    verified_payloads: number
+    missing_payloads: number
+    md5_mismatches: number
+    invalid_packages: number
+    cumulative_breaks: number
+  }
+  packages: Pm3OtaMirrorPackage[]
+  errors: string[]
+  warnings: string[]
 }

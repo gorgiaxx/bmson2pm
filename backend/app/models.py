@@ -161,9 +161,9 @@ class SongProject(BaseModel):
         # Lane IDs and PM3 track mapping stay stable. Only the former, incorrect
         # left/right interpretation of the large drum inputs is migrated.
         semantics = {
+            1: ("head_simultaneous", "鼓面同时击打", "both", "head_left", "左鼓面"),
+            2: ("rim_single", "鼓缘单击", "either", "rim_right", "右鼓缘"),
             3: ("rim_simultaneous", "鼓缘同时击打", "both", "rim_left", "左鼓缘"),
-            4: ("rim_single", "鼓缘单击", "either", "rim_right", "右鼓缘"),
-            5: ("head_simultaneous", "鼓面同时击打", "both", "head_left", "左鼓面"),
             6: ("head_single", "鼓面单击", "either", "head_right", "右鼓面"),
         }
         migrated = False

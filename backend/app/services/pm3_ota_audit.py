@@ -16,6 +16,8 @@ MAX_UPDATE_LIST_BYTES = 2 * 1024 * 1024
 MAX_UPDATE_OPERATIONS = 2000
 MD5_PATTERN = re.compile(r"^[0-9A-Fa-f]{32}$")
 VERSION_PATTERN = re.compile(r"^ver([0-9]{3})$")
+EDITION_PATTERN = re.compile(r"^edt([0-9]{3})([0-9]{3})$")
+MAX_MIRROR_PACKAGES = 500
 
 
 class Pm3OtaAuditError(ValueError):
@@ -36,7 +38,11 @@ class UpdateOperation:
     line_number: int
 
 
-def parse_update_list(payload: bytes) -> tuple[int, list[UpdateOperation]]:
+def parse_update_list(
+    payload: bytes,
+    *,
+    allow_add: bool = False,
+) -> tuple[int, list[UpdateOperation]]:
     if len(payload) > MAX_UPDATE_LIST_BYTES:
         raise Pm3OtaAuditError("update.lst 超过 2 MB 审计上限")
     try:
@@ -60,9 +66,18 @@ def parse_update_list(payload: bytes) -> tuple[int, list[UpdateOperation]]:
         if not stripped or stripped.startswith("#"):
             continue
         fields = [field.strip() for field in line.split(",")]
-        action = fields[0].casefold() if fields else ""
-        if action not in {"r", "d"}:
-            raise Pm3OtaAuditError(f"update.lst 第 {line_number} 行操作必须是 r 或 d")
+        action_token = fields[0] if fields else ""
+        action = action_token.casefold()
+        allowed_actions = {"r", "d"} | ({"a"} if allow_add else set())
+        if action not in allowed_actions:
+            allowed = "r、A 或 d" if allow_add else "r 或 d"
+            raise Pm3OtaAuditError(
+                f"update.lst 第 {line_number} 行操作必须是 {allowed}"
+            )
+        if action == "d" and action_token != "d":
+            raise Pm3OtaAuditError(
+                f"update.lst 第 {line_number} 行删除操作必须使用小写 d，以兼容 pcli"
+            )
         if len(fields) < 2 or not fields[1]:
             raise Pm3OtaAuditError(f"update.lst 第 {line_number} 行缺少目标路径")
         path = _safe_relative_path(fields[1], line_number)
@@ -71,10 +86,10 @@ def parse_update_list(payload: bytes) -> tuple[int, list[UpdateOperation]]:
             raise Pm3OtaAuditError(f"update.lst 重复操作同一路径：{path}")
         paths.add(lowered)
         expected_md5: str | None = None
-        if action == "r":
+        if action in {"r", "a"}:
             if len(fields) != 3 or not MD5_PATTERN.fullmatch(fields[2]):
                 raise Pm3OtaAuditError(
-                    f"update.lst 第 {line_number} 行替换操作需要 32 位 MD5"
+                    f"update.lst 第 {line_number} 行复制操作需要 32 位 MD5"
                 )
             expected_md5 = fields[2].upper()
         elif len(fields) > 2 and any(fields[2:]):
@@ -169,6 +184,7 @@ class Pm3OtaAuditor:
             for path in patch_root.rglob("*")
             if path.is_file()
             and path.name != "update.lst"
+            and path.name.casefold() not in {"report.json", ".ds_store"}
             and path.relative_to(patch_root).as_posix().casefold() not in listed_paths
         )
         if unmanaged:
@@ -311,6 +327,494 @@ class Pm3OtaAuditor:
                 "版本链仅在内存中模拟清单顺序，不修改 update.cfg 或任何游戏文件",
             ])),
         }
+
+    def audit_mirror(
+        self,
+        *,
+        generation: int | None = None,
+        installed_version: int | None = None,
+        installed_edition: int | None = None,
+        downloaded_version: int | None = None,
+        downloaded_edition: int | None = None,
+        verify_payloads: bool = False,
+    ) -> dict[str, Any]:
+        machine_cfg = self._read_version_config("machine.cfg", "Machine")
+        update_cfg = self._read_version_config("update.cfg", "Update")
+        generation = self._resolved_value(
+            generation, machine_cfg, "generation", "generation"
+        )
+        installed_version = self._resolved_value(
+            installed_version, machine_cfg, "version", "已安装 version"
+        )
+        installed_edition = self._resolved_value(
+            installed_edition, machine_cfg, "edition", "已安装 edition"
+        )
+        downloaded_version = self._resolved_value(
+            downloaded_version, update_cfg, "version", "目标 version"
+        )
+        downloaded_edition = self._resolved_value(
+            downloaded_edition, update_cfg, "edition", "目标 edition"
+        )
+        watermarks = (
+            generation,
+            installed_version,
+            installed_edition,
+            downloaded_version,
+            downloaded_edition,
+        )
+        if any(value < 0 or value > 999 for value in watermarks):
+            raise Pm3OtaAuditError("generation、version 与 edition 必须位于 0..999")
+
+        patch_name = self._patch_name(generation)
+        try:
+            mirror_root = self.workspace.resolve("mirror", "", expect="directory")
+            patch_root = self.workspace.resolve(
+                "mirror", patch_name, expect="directory"
+            )
+        except Pm3WorkspaceError as exc:
+            raise Pm3OtaAuditError(f"本地 FTP 镜像不可用：{exc}") from exc
+
+        try:
+            entries = sorted(patch_root.iterdir(), key=lambda path: path.name.casefold())
+        except OSError as exc:
+            raise Pm3OtaAuditError(f"无法读取 FTP 镜像目录：{exc}") from exc
+        package_dirs = [
+            path for path in entries
+            if path.is_dir()
+            and (VERSION_PATTERN.fullmatch(path.name) or EDITION_PATTERN.fullmatch(path.name))
+        ]
+        unsafe_package_dirs = [path.name for path in package_dirs if path.is_symlink()]
+        if unsafe_package_dirs:
+            raise Pm3OtaAuditError(
+                "FTP 镜像补丁目录不能是符号链接：" + ", ".join(unsafe_package_dirs)
+            )
+        if len(package_dirs) > MAX_MIRROR_PACKAGES:
+            raise Pm3OtaAuditError("FTP 镜像补丁目录超过 500 个审计上限")
+        if not package_dirs:
+            raise Pm3OtaAuditError(f"{patch_name} 没有 verNNN 或 edtNNNNNN 补丁")
+
+        packages = [
+            self._audit_mirror_package(path, verify_payloads=verify_payloads)
+            for path in package_dirs
+        ]
+        version_packages = {
+            package["version"]: package
+            for package in packages if package["kind"] == "version"
+        }
+        edition_packages = {
+            (package["version"], package["edition"]): package
+            for package in packages if package["kind"] == "edition"
+        }
+        errors = [
+            f"{package['name']}：{message}"
+            for package in packages for message in package["errors"]
+        ]
+        warnings = [
+            f"{package['name']}：{message}"
+            for package in packages for message in package["warnings"]
+        ]
+
+        edition_chains: list[dict[str, Any]] = []
+        cumulative_breaks = 0
+        edition_versions = sorted({version for version, _ in edition_packages})
+        for version in edition_versions:
+            chain = sorted(
+                (
+                    package for (package_version, _), package in edition_packages.items()
+                    if package_version == version
+                ),
+                key=lambda package: package["edition"],
+            )
+            breaks: list[dict[str, Any]] = []
+            for previous, current in zip(chain, chain[1:]):
+                missing_paths = sorted(
+                    set(previous["operation_paths"]) - set(current["operation_paths"])
+                )
+                current["cumulative"] = not missing_paths
+                if missing_paths:
+                    cumulative_breaks += 1
+                    detail = {
+                        "previous": previous["name"],
+                        "current": current["name"],
+                        "missing_count": len(missing_paths),
+                        "missing_paths": missing_paths[:100],
+                    }
+                    breaks.append(detail)
+                    errors.append(
+                        f"{current['name']} 不是累计 edition，缺少 {len(missing_paths)} 个前版路径"
+                    )
+            edition_chains.append({
+                "version": version,
+                "editions": [package["edition"] for package in chain],
+                "cumulative": not breaks,
+                "breaks": breaks,
+            })
+
+        plan_errors: list[str] = []
+        version_steps: list[str] = []
+        edition_step: str | None = None
+        missing_versions: list[int] = []
+        if downloaded_version < installed_version:
+            plan_errors.append("目标 version 低于已安装 version，PowerOn 不支持降级")
+        else:
+            for version in range(installed_version + 1, downloaded_version + 1):
+                package = version_packages.get(version)
+                if package is None:
+                    missing_versions.append(version)
+                else:
+                    version_steps.append(package["name"])
+                    package["planned"] = True
+            base_edition = installed_edition if downloaded_version == installed_version else 0
+            if downloaded_edition < base_edition:
+                plan_errors.append("目标 edition 低于已安装 edition，PowerOn 不支持降级")
+            elif downloaded_edition > base_edition:
+                package = edition_packages.get((downloaded_version, downloaded_edition))
+                if package is None:
+                    plan_errors.append(
+                        f"缺少目标 edition：edt{downloaded_version:03d}{downloaded_edition:03d}"
+                    )
+                else:
+                    edition_step = package["name"]
+                    package["planned"] = True
+        if missing_versions:
+            plan_errors.append(
+                "缺少连续 version：" + ", ".join(
+                    f"ver{version:03d}" for version in missing_versions
+                )
+            )
+        errors.extend(plan_errors)
+
+        version_numbers = sorted(version_packages)
+        catalog_gaps = [
+            version for version in range(version_numbers[0], version_numbers[-1] + 1)
+            if version not in version_packages
+        ] if version_numbers else []
+        unknown_dirs = [
+            path.name for path in entries
+            if path.is_dir()
+            and not VERSION_PATTERN.fullmatch(path.name)
+            and not EDITION_PATTERN.fullmatch(path.name)
+        ]
+        if unknown_dirs:
+            warnings.append(
+                f"{patch_name} 有 {len(unknown_dirs)} 个非补丁子目录"
+            )
+        if catalog_gaps:
+            warnings.append(
+                "镜像 version 编号存在空档：" + ", ".join(
+                    f"ver{version:03d}" for version in catalog_gaps
+                )
+            )
+        if not verify_payloads:
+            warnings.append("当前只检查 payload 存在性，尚未计算全部 MD5")
+        warnings.extend([
+            "镜像审计只读取本地目录，不连接 FTP、NetPatch 或 PM3 主机",
+            "升级计划仅模拟 PowerOn 选择顺序，不修改 machine.cfg 或 update.cfg",
+        ])
+
+        counts = {
+            "packages": len(packages),
+            "versions": len(version_packages),
+            "editions": len(edition_packages),
+            "operations": sum(package["operation_count"] for package in packages),
+            "replace": sum(package["counts"]["replace"] for package in packages),
+            "add": sum(package["counts"]["add"] for package in packages),
+            "delete": sum(package["counts"]["delete"] for package in packages),
+            "verified_payloads": sum(
+                package["counts"]["verified_payloads"] for package in packages
+            ),
+            "missing_payloads": sum(
+                package["counts"]["missing_payloads"] for package in packages
+            ),
+            "md5_mismatches": sum(
+                package["counts"]["md5_mismatches"] for package in packages
+            ),
+            "invalid_packages": sum(not package["valid"] for package in packages),
+            "cumulative_breaks": cumulative_breaks,
+        }
+        public_packages = []
+        for package in packages:
+            public_package = {
+                key: value for key, value in package.items()
+                if key != "operation_paths"
+            }
+            public_packages.append(public_package)
+        return {
+            "valid": not errors,
+            "read_only": True,
+            "verify_payloads": verify_payloads,
+            "integrity_verified": verify_payloads and not errors,
+            "root": str(mirror_root),
+            "patch_root": patch_name,
+            "generation": generation,
+            "installed": {
+                "version": installed_version,
+                "edition": installed_edition,
+            },
+            "downloaded": {
+                "version": downloaded_version,
+                "edition": downloaded_edition,
+            },
+            "config": {
+                "machine": machine_cfg,
+                "update": update_cfg,
+            },
+            "available": {
+                "versions": version_numbers,
+                "editions": {
+                    str(version): sorted(
+                        edition for package_version, edition in edition_packages
+                        if package_version == version
+                    )
+                    for version in edition_versions
+                },
+                "catalog_version_gaps": catalog_gaps,
+            },
+            "plan": {
+                "valid": not plan_errors,
+                "version_steps": version_steps,
+                "edition_step": edition_step,
+                "steps": [*version_steps, *([edition_step] if edition_step else [])],
+                "missing_versions": missing_versions,
+                "errors": plan_errors,
+            },
+            "edition_chains": edition_chains,
+            "counts": counts,
+            "packages": public_packages,
+            "errors": list(dict.fromkeys(errors)),
+            "warnings": list(dict.fromkeys(warnings)),
+        }
+
+    def _audit_mirror_package(
+        self,
+        directory: Path,
+        *,
+        verify_payloads: bool,
+    ) -> dict[str, Any]:
+        version_match = VERSION_PATTERN.fullmatch(directory.name)
+        edition_match = EDITION_PATTERN.fullmatch(directory.name)
+        kind = "version" if version_match else "edition"
+        version = int((version_match or edition_match).group(1))
+        edition = int(edition_match.group(2)) if edition_match else 0
+        errors: list[str] = []
+        warnings: list[str] = []
+        update_path = directory / "update.lst"
+        if not update_path.is_file():
+            return {
+                "name": directory.name,
+                "kind": kind,
+                "version": version,
+                "edition": edition,
+                "timestamp": None,
+                "activation_time": None,
+                "due": None,
+                "operation_count": 0,
+                "counts": {
+                    "replace": 0,
+                    "add": 0,
+                    "delete": 0,
+                    "verified_payloads": 0,
+                    "missing_payloads": 0,
+                    "md5_mismatches": 0,
+                    "unmanaged_files": 0,
+                },
+                "operation_paths": [],
+                "mismatches": [],
+                "missing_payloads": [],
+                "unmanaged_files": [],
+                "planned": False,
+                "cumulative": None,
+                "valid": False,
+                "errors": ["缺少 update.lst"],
+                "warnings": [],
+            }
+        if update_path.is_symlink():
+            return {
+                "name": directory.name,
+                "kind": kind,
+                "version": version,
+                "edition": edition,
+                "timestamp": None,
+                "activation_time": None,
+                "due": None,
+                "operation_count": 0,
+                "counts": {
+                    "replace": 0,
+                    "add": 0,
+                    "delete": 0,
+                    "verified_payloads": 0,
+                    "missing_payloads": 0,
+                    "md5_mismatches": 0,
+                    "unmanaged_files": 0,
+                },
+                "operation_paths": [],
+                "mismatches": [],
+                "missing_payloads": [],
+                "unmanaged_files": [],
+                "planned": False,
+                "cumulative": None,
+                "valid": False,
+                "errors": ["update.lst 不能是符号链接"],
+                "warnings": [],
+            }
+        try:
+            timestamp, operations = parse_update_list(
+                update_path.read_bytes(), allow_add=True
+            )
+        except (OSError, Pm3OtaAuditError) as exc:
+            return {
+                "name": directory.name,
+                "kind": kind,
+                "version": version,
+                "edition": edition,
+                "timestamp": None,
+                "activation_time": None,
+                "due": None,
+                "operation_count": 0,
+                "counts": {
+                    "replace": 0,
+                    "add": 0,
+                    "delete": 0,
+                    "verified_payloads": 0,
+                    "missing_payloads": 0,
+                    "md5_mismatches": 0,
+                    "unmanaged_files": 0,
+                },
+                "operation_paths": [],
+                "mismatches": [],
+                "missing_payloads": [],
+                "unmanaged_files": [],
+                "planned": False,
+                "cumulative": None,
+                "valid": False,
+                "errors": [str(exc)],
+                "warnings": [],
+            }
+
+        mismatches: list[dict[str, str]] = []
+        missing_payloads: list[str] = []
+        listed_payloads: set[str] = set()
+        verified_payloads = 0
+        for operation in operations:
+            target = self._package_path(directory, operation.path)
+            if operation.action in {"r", "a"}:
+                listed_payloads.add(operation.path.casefold())
+                if not target.is_file():
+                    missing_payloads.append(operation.path)
+                    errors.append(f"payload 缺失：{operation.path}")
+                    continue
+                if verify_payloads:
+                    try:
+                        actual_md5 = self._md5(target)
+                    except OSError as exc:
+                        errors.append(f"无法读取 payload：{operation.path}（{exc}）")
+                        continue
+                    if actual_md5 != operation.expected_md5:
+                        mismatches.append({
+                            "path": operation.path,
+                            "expected_md5": operation.expected_md5 or "",
+                            "actual_md5": actual_md5,
+                        })
+                        errors.append(f"MD5 不匹配：{operation.path}")
+                    else:
+                        verified_payloads += 1
+            elif target.exists() or target.is_symlink():
+                warnings.append(f"删除操作同时携带同名 payload：{operation.path}")
+
+        unmanaged_files = sorted(
+            path.relative_to(directory).as_posix()
+            for path in directory.rglob("*")
+            if path.is_file()
+            and path.name.casefold() not in {"update.lst", ".listing", ".ds_store"}
+            and path.relative_to(directory).as_posix().casefold() not in listed_payloads
+        )
+        if unmanaged_files:
+            warnings.append(f"有 {len(unmanaged_files)} 个未列入清单的 payload")
+        try:
+            activation_time = datetime.fromtimestamp(
+                timestamp, tz=timezone.utc
+            ).isoformat() if timestamp else None
+        except (OverflowError, OSError, ValueError):
+            activation_time = None
+            warnings.append("清单时间戳无法转换为 UTC 时间")
+        return {
+            "name": directory.name,
+            "kind": kind,
+            "version": version,
+            "edition": edition,
+            "timestamp": timestamp,
+            "activation_time": activation_time,
+            "due": datetime.now(timezone.utc).timestamp() > timestamp,
+            "operation_count": len(operations),
+            "counts": {
+                "replace": sum(operation.action == "r" for operation in operations),
+                "add": sum(operation.action == "a" for operation in operations),
+                "delete": sum(operation.action == "d" for operation in operations),
+                "verified_payloads": verified_payloads,
+                "missing_payloads": len(missing_payloads),
+                "md5_mismatches": len(mismatches),
+                "unmanaged_files": len(unmanaged_files),
+            },
+            "operation_paths": [operation.path for operation in operations],
+            "mismatches": mismatches[:100],
+            "missing_payloads": missing_payloads[:100],
+            "unmanaged_files": unmanaged_files[:100],
+            "planned": False,
+            "cumulative": None,
+            "valid": not errors,
+            "errors": errors,
+            "warnings": warnings,
+        }
+
+    def _read_version_config(
+        self,
+        filename: str,
+        identifier: str,
+    ) -> dict[str, int] | None:
+        try:
+            path = self.workspace.resolve("rewrite", filename, expect="file")
+            text = path.read_text(encoding="ascii")
+        except (Pm3WorkspaceError, OSError, UnicodeError):
+            return None
+        for line in text.splitlines():
+            fields = [field.strip() for field in line.split(",")]
+            if not fields or fields[0].casefold() != identifier.casefold():
+                continue
+            try:
+                values = [int(field) for field in fields[1:]]
+            except ValueError:
+                return None
+            if identifier.casefold() == "machine" and len(values) >= 4:
+                return {
+                    "generation": values[0],
+                    "version": values[1],
+                    "edition": values[2],
+                    "area": values[3],
+                }
+            if identifier.casefold() == "update" and len(values) >= 2:
+                return {"version": values[0], "edition": values[1]}
+        return None
+
+    @staticmethod
+    def _resolved_value(
+        override: int | None,
+        config: dict[str, int] | None,
+        key: str,
+        label: str,
+    ) -> int:
+        if override is not None:
+            return override
+        if config is None or key not in config:
+            raise Pm3OtaAuditError(f"无法从本地配置读取{label}，请显式指定")
+        return config[key]
+
+    @staticmethod
+    def _patch_name(generation: int) -> str:
+        if generation == 1:
+            return "patch"
+        if generation == 3:
+            return "patch_fa"
+        return f"patch{generation:03d}"
 
     @staticmethod
     def _patch_root(package: Path, report: dict[str, Any]) -> Path:

@@ -19,8 +19,20 @@ from ..adapters.pm3_crypto import decrypt_chart, decrypt_song_list, encrypt_song
 from ..adapters.pm3_parser import DIFFICULTY_BY_CLASS, parse_chart_text, parse_song_list
 from ..models import DifficultyId, SongProject
 from ..storage import ProjectAssetError, ProjectNotFoundError, ProjectStore
-from .pm3_resources import PM3_MV_IDS
-from .pm3_roms import Pm3RomBuildError, Pm3RomBuilder, Pm3RomSong
+from .pm3_resources import (
+    PM3_CUSTOM_MV_IDS,
+    PM3_MV_IDS,
+    Pm3ResourceError,
+    convert_pm3_key_sound,
+    inspect_pm3_mv_swf,
+)
+from .pm3_roms import (
+    Pm3RomBuildError,
+    Pm3RomBuilder,
+    Pm3RomKeySound,
+    Pm3RomMv,
+    Pm3RomSong,
+)
 from .pm3_workspace import Pm3Workspace, Pm3WorkspaceError
 
 
@@ -100,14 +112,19 @@ class Pm3ExportService:
         )
         files = [self._file_info(f"rewrite/script_download/{built.filename}", built.container)]
         resource_package = self._resource_package(
-            project, built.song_id, mv_id, resource_profile
+            project, built.song_id, mv_id, resource_profile, built=built
         )
         if include_resources and resource_package["complete"]:
             if resource_profile == "squashfs-ota":
                 files.extend(self._planned_rom_files(resource_package))
             else:
                 resource_artifacts = self._build_resource_artifacts(
-                    project, built.song_id, mv_id, resource_package, resource_profile
+                    project,
+                    built.song_id,
+                    mv_id,
+                    resource_package,
+                    resource_profile,
+                    built=built,
                 )
                 files.extend(
                     self._file_info(relative, payload)
@@ -194,11 +211,16 @@ class Pm3ExportService:
             artifacts = {f"rewrite/script_download/{built.filename}": built.container}
             warnings = list(built.warnings)
             resource_package = self._resource_package(
-                project, built.song_id, mv_id, resource_profile
+                project, built.song_id, mv_id, resource_profile, built=built
             )
             if include_resources:
                 artifacts.update(self._build_resource_artifacts(
-                    project, built.song_id, mv_id, resource_package, resource_profile
+                    project,
+                    built.song_id,
+                    mv_id,
+                    resource_package,
+                    resource_profile,
+                    built=built,
                 ))
                 warnings.extend(resource_package["warnings"])
             if include_song_list:
@@ -248,6 +270,13 @@ class Pm3ExportService:
     def version_candidates(self) -> list[dict[str, Any]]:
         if self.project_store is None:
             raise Pm3ExportError("PM3 多曲版本需要项目存储")
+        latest_report = self._latest_version_report()
+        released_by_project = {
+            str(song.get("project_id")): song
+            for song in (latest_report or {}).get("songs", [])
+            if isinstance(song, dict) and song.get("project_id")
+        }
+        next_version_name = self._next_version_name(latest_report)
         candidates: list[dict[str, Any]] = []
         for summary in self.project_store.list():
             try:
@@ -280,6 +309,10 @@ class Pm3ExportService:
                 "difficulties": difficulties,
                 "audio_ready": bool(background["available"] and preview["available"]),
                 "audio": {"background": background, "preview": preview},
+                "released": self._released_candidate(
+                    released_by_project.get(project.id), latest_report
+                ),
+                "next_version_name": next_version_name,
                 "updated_at": project.updated_at.isoformat(),
             })
         return candidates
@@ -307,6 +340,8 @@ class Pm3ExportService:
         return {
             "valid": prepared["complete"],
             "version_name": version_name,
+            "cumulative": True,
+            "lineage": prepared["lineage"],
             "songs": prepared["songs"],
             "stats": prepared["stats"],
             "rom": prepared["rom"],
@@ -343,9 +378,13 @@ class Pm3ExportService:
                 missing = [
                     str(song["song_id"])
                     for song in prepared["songs"]
-                    if not song["audio_ready"]
+                    if not song["resource_ready"]
                 ]
-                detail = f"曲目 {', '.join(missing)} 缺少完整音频" if missing else "ROM 构建环境不完整"
+                detail = (
+                    f"曲目 {', '.join(missing)} 缺少完整歌曲资源"
+                    if missing
+                    else "ROM 构建环境不完整"
+                )
                 raise Pm3ExportError(f"PM3 多曲版本无法构建：{detail}")
             rom_songs = [
                 Pm3RomSong(
@@ -356,6 +395,12 @@ class Pm3ExportService:
                     ),
                     preview=self._read_resource(
                         song["project"], self._audio_resource_ref(song["project"], "preview")
+                    ),
+                    key_sounds=self._prepare_key_sounds(
+                        song["project"], song["key_sound_paths"]
+                    ),
+                    custom_mv=self._prepare_custom_mv(
+                        song["project"], song["mv_id"]
                     ),
                 )
                 for song in prepared["resource_songs"]
@@ -388,6 +433,8 @@ class Pm3ExportService:
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "filename": version_name,
                     "version_name": version_name,
+                    "cumulative": True,
+                    "lineage": prepared["lineage"],
                     "target_version": f"PM3 offline {version_name}",
                     "target": {
                         "id": "staging",
@@ -396,7 +443,11 @@ class Pm3ExportService:
                         "path": str(self.exports_root),
                     },
                     "songs": [
-                        {key: value for key, value in song.items() if key != "project"}
+                        {
+                            key: value
+                            for key, value in song.items()
+                            if key not in {"project", "key_sound_paths"}
+                        }
                         for song in prepared["songs"]
                     ],
                     "stats": prepared["stats"],
@@ -559,8 +610,9 @@ class Pm3ExportService:
             raise Pm3ExportError("PM3 多曲版本需要项目存储")
         if not entries:
             raise Pm3ExportError("PM3 多曲版本至少需要一张谱面")
-        if len(entries) > 50:
-            raise Pm3ExportError("PM3 多曲版本一次最多包含 50 张谱面")
+        if len(entries) > 250:
+            raise Pm3ExportError("PM3 多曲版本一次最多包含 250 张谱面")
+        lineage = self._version_lineage(version_name)
 
         charts: list[tuple[SongProject, DifficultyId, Pm3BuildResult]] = []
         chart_summaries: list[dict[str, Any]] = []
@@ -568,6 +620,7 @@ class Pm3ExportService:
         filenames: set[str] = set()
         warnings: list[str] = []
         artifacts: dict[str, bytes] = {}
+        selected_settings: dict[tuple[str, str], dict[str, int]] = {}
 
         for raw in entries:
             project_id = str(raw.get("project_id", ""))
@@ -595,6 +648,16 @@ class Pm3ExportService:
             if slot < 0 or slot > 9:
                 raise Pm3ExportError("PM3 Key slot 必须在 0..9")
             self._validate_mv_id(mv_id)
+            entry_key = (project.id, difficulty.value)
+            if entry_key in selected_settings:
+                raise Pm3ExportError(
+                    f"{project.metadata.title} 的 {difficulty.value} 难度被重复加入版本"
+                )
+            selected_settings[entry_key] = {
+                "song_id": song_id,
+                "slot": slot,
+                "mv_id": mv_id,
+            }
             built = self.adapter.build_with_report(
                 project, difficulty, slot=slot, song_id=song_id,
             )
@@ -610,7 +673,11 @@ class Pm3ExportService:
             resource_song = resource_by_song.get(song_id)
             if resource_song is None:
                 package = self._resource_package(
-                    project, song_id, mv_id, "squashfs-ota"
+                    project,
+                    song_id,
+                    mv_id,
+                    "squashfs-ota",
+                    key_sound_paths=built.key_sound_paths,
                 )
                 resource_song = {
                     "song_id": song_id,
@@ -622,6 +689,15 @@ class Pm3ExportService:
                         package["audio"]["background"]["available"]
                         and package["audio"]["preview"]["available"]
                     ),
+                    "key_sounds_ready": package["key_sounds"]["complete"],
+                    "key_sound_count": package["key_sounds"]["required_count"],
+                    "resource_ready": bool(
+                        package["audio"]["background"]["available"]
+                        and package["audio"]["preview"]["available"]
+                        and package["key_sounds"]["complete"]
+                        and package["mv"]["available"]
+                    ),
+                    "key_sound_paths": dict(built.key_sound_paths),
                     "project": project,
                     "package": package,
                     "charts": [],
@@ -630,6 +706,29 @@ class Pm3ExportService:
             elif resource_song["project_id"] != project.id or resource_song["mv_id"] != mv_id:
                 raise Pm3ExportError(
                     f"曲目序号 {song_id} 被不同项目或 MV 重复使用"
+                )
+            else:
+                for asset_id, path in built.key_sound_paths.items():
+                    previous = resource_song["key_sound_paths"].get(asset_id)
+                    if previous is not None and previous != path:
+                        raise Pm3ExportError(
+                            f"曲目 {song_id} 的 Key 音 {asset_id} 逻辑路径不一致"
+                        )
+                    resource_song["key_sound_paths"][asset_id] = path
+                package = self._resource_package(
+                    project,
+                    song_id,
+                    mv_id,
+                    "squashfs-ota",
+                    key_sound_paths=resource_song["key_sound_paths"],
+                )
+                resource_song["package"] = package
+                resource_song["key_sounds_ready"] = package["key_sounds"]["complete"]
+                resource_song["key_sound_count"] = package["key_sounds"]["required_count"]
+                resource_song["resource_ready"] = bool(
+                    resource_song["audio_ready"]
+                    and package["key_sounds"]["complete"]
+                    and package["mv"]["available"]
                 )
             chart_summary = {
                 "project_id": project.id,
@@ -648,11 +747,27 @@ class Pm3ExportService:
             chart_summaries.append(chart_summary)
             resource_song["charts"].append(chart_summary)
 
+        self._validate_cumulative_selection(lineage, selected_settings)
         resource_songs = list(resource_by_song.values())
+        custom_mv_hashes: dict[int, str] = {}
+        for song in resource_songs:
+            mv = song["package"]["mv"]
+            if not mv["custom"] or not mv["available"]:
+                continue
+            inspection = mv.get("inspection")
+            digest = inspection.get("sha256") if isinstance(inspection, dict) else None
+            previous = custom_mv_hashes.get(song["mv_id"])
+            if previous is not None and previous != digest:
+                raise Pm3ExportError(
+                    f"自定义 MV {song['mv_id']} 被多个不同文件重复使用"
+                )
+            if isinstance(digest, str):
+                custom_mv_hashes[song["mv_id"]] = digest
         try:
-            rom = self.rom_builder.inspect_many([
-                song["song_id"] for song in resource_songs
-            ])
+            rom = self.rom_builder.inspect_many(
+                [song["song_id"] for song in resource_songs],
+                custom_mv_ids=list(custom_mv_hashes),
+            )
         except Pm3RomBuildError as exc:
             raise Pm3ExportError(str(exc)) from exc
         song_list, song_list_plaintext, song_list_encoding, song_warnings = (
@@ -661,24 +776,31 @@ class Pm3ExportService:
         artifacts["rewrite/script_download/SongList.enc"] = song_list
         warnings.extend(song_warnings)
         for song in resource_songs:
-            package_warnings = song["package"]["warnings"]
-            warnings.extend(
-                warning for warning in package_warnings
-                if warning.startswith("尚未准备")
-            )
+            warnings.extend(song["package"]["warnings"])
         if not rom["available"]:
             warnings.append(f"离线 ROM 构建环境不完整：{'、'.join(rom['missing'])}")
         warnings.extend([
-            "多曲版本从同一只读原版基线一次性重建共享 ROM，不会互相覆盖歌曲资源",
+            (
+                f"已继承 {lineage['base_version_name']} 的 "
+                f"{lineage['required_song_count']} 首歌曲和 "
+                f"{lineage['required_chart_count']} 张谱面"
+                if lineage["base_version_name"]
+                else "这是当前本地发布谱系的首个累计版本"
+            ),
+            "版本会从只读原版基线重建全部历史歌曲的共享 ROM 和 SongList，不会移除早期自制歌曲",
             f"{version_name} 仅生成与 OTA 镜像同形的归档目录，不会连接 FTP 或修改 update.cfg",
             "ROM 会逐曲回读校验；尚未经过 PM3 真机动态验证",
         ])
         songs = [
-            {key: value for key, value in song.items() if key not in {"project", "package"}}
+            {
+                key: value
+                for key, value in song.items()
+                if key not in {"project", "package", "key_sound_paths"}
+            }
             for song in resource_songs
         ]
         complete = bool(
-            rom["available"] and all(song["audio_ready"] for song in resource_songs)
+            rom["available"] and all(song["resource_ready"] for song in resource_songs)
         )
         return {
             "complete": complete,
@@ -689,6 +811,10 @@ class Pm3ExportService:
             "rom": rom,
             "song_list_plaintext": song_list_plaintext,
             "song_list_encoding": song_list_encoding,
+            "lineage": {
+                key: value for key, value in lineage.items()
+                if key != "required_entries"
+            },
             "warnings": list(dict.fromkeys(warnings)),
             "stats": {
                 "song_count": len(resource_songs),
@@ -697,8 +823,163 @@ class Pm3ExportService:
                 "bundles": rom["bundles"],
                 "note_objects": sum(item["note_objects"] for item in chart_summaries),
                 "event_count": sum(item["event_count"] for item in chart_summaries),
+                "custom_key_sound_count": sum(
+                    song["key_sound_count"] for song in resource_songs
+                ),
+                "custom_mv_count": len(custom_mv_hashes),
             },
         }
+
+    def _latest_version_report(self) -> dict[str, Any] | None:
+        reports: list[tuple[int, str, dict[str, Any]]] = []
+        for path in self.exports_root.glob("*/report.json"):
+            try:
+                report = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(report, dict) or report.get("kind") != "pm3-version":
+                continue
+            version_name = str(report.get("version_name", ""))
+            match = PM3_VERSION_DIRECTORY.fullmatch(version_name)
+            if match is None:
+                continue
+            reports.append((
+                int(version_name[3:]),
+                str(report.get("created_at", "")),
+                report,
+            ))
+        return max(reports, key=lambda item: (item[0], item[1]))[2] if reports else None
+
+    @staticmethod
+    def _next_version_name(report: dict[str, Any] | None) -> str:
+        if report is None:
+            return "ver010"
+        current = int(str(report["version_name"])[3:])
+        return f"ver{min(999, current + 1):03d}"
+
+    @staticmethod
+    def _released_candidate(
+        song: Any,
+        report: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(song, dict) or report is None:
+            return None
+        charts = song.get("charts")
+        chart_rows = charts if isinstance(charts, list) else []
+        difficulties = [
+            str(chart.get("difficulty"))
+            for chart in chart_rows
+            if isinstance(chart, dict) and chart.get("difficulty")
+        ]
+        slots = {
+            int(chart["slot"])
+            for chart in chart_rows
+            if isinstance(chart, dict) and isinstance(chart.get("slot"), int)
+        }
+        return {
+            "version_name": report.get("version_name"),
+            "song_id": song.get("song_id"),
+            "slot": next(iter(slots)) if len(slots) == 1 else 0,
+            "mv_id": song.get("mv_id", 0),
+            "difficulties": list(dict.fromkeys(difficulties)),
+        }
+
+    def _version_lineage(self, version_name: str) -> dict[str, Any]:
+        latest = self._latest_version_report()
+        target_version = int(version_name[3:])
+        if latest is None:
+            return {
+                "cumulative": True,
+                "base_export_id": None,
+                "base_version_name": None,
+                "required_song_count": 0,
+                "required_chart_count": 0,
+                "required_entries": {},
+            }
+        latest_version = int(str(latest["version_name"])[3:])
+        if target_version < latest_version:
+            raise Pm3ExportError(
+                f"本地最新累计版本是 {latest['version_name']}，不能回到更早的 {version_name}"
+            )
+        if target_version > latest_version + 1:
+            raise Pm3ExportError(
+                f"本地累计版本必须连续；当前应使用 {self._next_version_name(latest)}"
+            )
+        required_entries: dict[tuple[str, str], dict[str, Any]] = {}
+        songs = latest.get("songs")
+        if not isinstance(songs, list):
+            raise Pm3ExportError("本地最新版本报告缺少歌曲清单，无法安全累计发布")
+        for song in songs:
+            if not isinstance(song, dict):
+                continue
+            project_id = song.get("project_id")
+            song_id = song.get("song_id")
+            mv_id = song.get("mv_id")
+            charts = song.get("charts")
+            if (
+                not isinstance(project_id, str)
+                or not isinstance(song_id, int)
+                or not isinstance(mv_id, int)
+                or not isinstance(charts, list)
+            ):
+                raise Pm3ExportError("本地最新版本报告的歌曲字段不完整")
+            for chart in charts:
+                if not isinstance(chart, dict):
+                    continue
+                difficulty = chart.get("difficulty")
+                slot = chart.get("slot")
+                if not isinstance(difficulty, str) or not isinstance(slot, int):
+                    raise Pm3ExportError("本地最新版本报告的谱面字段不完整")
+                required_entries[(project_id, difficulty)] = {
+                    "project_id": project_id,
+                    "difficulty": difficulty,
+                    "song_id": song_id,
+                    "slot": slot,
+                    "mv_id": mv_id,
+                    "title": str(song.get("title", project_id)),
+                }
+        return {
+            "cumulative": True,
+            "base_export_id": latest.get("export_id"),
+            "base_version_name": latest.get("version_name"),
+            "required_song_count": len({
+                item["song_id"] for item in required_entries.values()
+            }),
+            "required_chart_count": len(required_entries),
+            "required_entries": required_entries,
+        }
+
+    @staticmethod
+    def _validate_cumulative_selection(
+        lineage: dict[str, Any],
+        selected: dict[tuple[str, str], dict[str, int]],
+    ) -> None:
+        required = lineage["required_entries"]
+        missing = [
+            item for key, item in required.items()
+            if key not in selected
+        ]
+        if missing:
+            labels = "、".join(
+                f"{item['title']} ({item['difficulty']})"
+                for item in missing[:6]
+            )
+            suffix = f" 等 {len(missing)} 张" if len(missing) > 6 else ""
+            raise Pm3ExportError(
+                f"累计版本不能移除已发布谱面：{labels}{suffix}"
+            )
+        for key, expected in required.items():
+            actual = selected[key]
+            for field, label in (
+                ("song_id", "曲目序号"),
+                ("slot", "Key slot"),
+                ("mv_id", "MV"),
+            ):
+                if actual[field] != expected[field]:
+                    raise Pm3ExportError(
+                        f"已发布谱面 {expected['title']} ({expected['difficulty']}) "
+                        f"不能改变{label}"
+                    )
 
     @staticmethod
     def _project_song_id(project: SongProject) -> int | None:
@@ -718,10 +999,18 @@ class Pm3ExportService:
         slot = project.game_specific_data.get("pm3_slot")
         return int(slot) if isinstance(slot, int) and 0 <= slot <= 9 else 0
 
-    @staticmethod
-    def _project_mv_id(project: SongProject) -> int:
+    def _project_mv_id(self, project: SongProject) -> int:
         value = project.mv_configuration.get("pm3_mv_id")
-        return int(value) if isinstance(value, int) and value in PM3_MV_IDS else 0
+        if isinstance(value, int) and value in PM3_MV_IDS:
+            return value
+        mv = self._pm3_mv_config(project)
+        if (
+            isinstance(value, int)
+            and value in PM3_CUSTOM_MV_IDS
+            and mv.get("id") == value
+        ):
+            return value
+        return 0
 
     @staticmethod
     def _validate_version_name(version_name: str) -> None:
@@ -934,19 +1223,43 @@ class Pm3ExportService:
         song_id: int,
         mv_id: int,
         resource_profile: str,
+        *,
+        built: Pm3BuildResult | None = None,
+        key_sound_paths: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        selected_key_sound_paths = (
+            built.key_sound_paths if built is not None else (key_sound_paths or {})
+        )
         background_ref = self._audio_resource_ref(project, "background")
         preview_ref = self._audio_resource_ref(project, "preview")
         background = self._resource_status(project, background_ref)
         preview = self._resource_status(project, preview_ref)
+        key_sounds = self._key_sound_status(project, selected_key_sound_paths)
+        mv = self._mv_status(project, mv_id)
         warnings = []
         if not background["available"]:
             warnings.append("尚未准备 PM3 主音乐；需要 Ogg Vorbis 44.1 kHz 双声道资源")
         if not preview["available"]:
             warnings.append("尚未准备 PM3 选歌试听；需要 PCM S16LE WAV 44.1 kHz 双声道资源")
+        if not key_sounds["complete"]:
+            if key_sounds["missing_count"]:
+                warnings.append(
+                    "尚有 "
+                    f"{key_sounds['missing_count']} 个谱面使用的 Key 音缺少原始音频资源"
+                )
+            elif not key_sounds["transcoder_available"]:
+                warnings.append("未找到 ffmpeg，无法把自定义 Key 音转换为 PM3 PCM WAV")
+        if not mv["available"]:
+            warnings.append(
+                mv.get("error")
+                or f"自定义 MV {mv_id} 尚未上传或与当前项目配置不一致"
+            )
         rom = None
         if resource_profile == "squashfs-ota":
-            rom = self.rom_builder.inspect(song_id)
+            rom = self.rom_builder.inspect(
+                song_id,
+                custom_mv_id=mv_id if mv["custom"] else None,
+            )
             if not rom["available"]:
                 warnings.append(f"离线 ROM 构建环境不完整：{'、'.join(rom['missing'])}")
             warnings.extend([
@@ -965,6 +1278,8 @@ class Pm3ExportService:
             "complete": bool(
                 background["available"]
                 and preview["available"]
+                and key_sounds["complete"]
+                and mv["available"]
                 and (rom is None or rom["available"])
             ),
             "song_id": song_id,
@@ -982,9 +1297,9 @@ class Pm3ExportService:
                     "output_path": f"media/sound/preview/p{song_id:03d}.wav",
                 },
             },
+            "key_sounds": key_sounds,
             "mv": {
-                "id": mv_id,
-                "available": mv_id in PM3_MV_IDS,
+                **mv,
                 "mapping": f"StageConfig.MV[{song_id}] = {mv_id}",
                 "requires_lua_rom_rebuild": resource_profile != "squashfs-ota",
             },
@@ -999,6 +1314,8 @@ class Pm3ExportService:
         mv_id: int,
         package: dict[str, Any],
         resource_profile: str,
+        *,
+        built: Pm3BuildResult,
     ) -> dict[str, bytes]:
         if not package["complete"]:
             missing = [
@@ -1008,6 +1325,10 @@ class Pm3ExportService:
             rom = package.get("rom")
             if isinstance(rom, dict) and not rom.get("available"):
                 missing.append("ROM 构建环境")
+            if not package["key_sounds"]["complete"]:
+                missing.append("Key 音")
+            if not package["mv"]["available"]:
+                missing.append("自定义 MV")
             raise Pm3ExportError(f"PM3 完整歌曲资源不齐：{'、'.join(missing)}")
         background_ref = self._audio_resource_ref(project, "background")
         preview_ref = self._audio_resource_ref(project, "preview")
@@ -1020,6 +1341,10 @@ class Pm3ExportService:
                     mv_id=mv_id,
                     background=background,
                     preview=preview,
+                    key_sounds=self._prepare_key_sounds(
+                        project, built.key_sound_paths
+                    ),
+                    custom_mv=self._prepare_custom_mv(project, mv_id),
                 )
             except Pm3RomBuildError as exc:
                 raise Pm3ExportError(str(exc)) from exc
@@ -1033,6 +1358,9 @@ class Pm3ExportService:
             f"media/sound/BG/BG_{song_id:03d}.ogg": background,
             f"media/sound/preview/p{song_id:03d}.wav": preview,
         }
+        custom_mv = self._prepare_custom_mv(project, mv_id)
+        if custom_mv is not None:
+            artifacts[f"media/ui/mv/mv{mv_id}.swf"] = custom_mv.payload
         snippet_path = f"package/stage-mv-{song_id:03d}.lua"
         artifacts[snippet_path] = (
             f"-- Merge into StageConfig.MV in media/lua_script/stage.lua\n"
@@ -1063,8 +1391,13 @@ class Pm3ExportService:
                 "preview_start": package["audio"]["preview_start"],
                 "preview_duration": package["audio"]["preview_duration"],
             },
+            "key_sounds": package["key_sounds"],
             "mv": {
                 "id": mv_id,
+                "custom": package["mv"]["custom"],
+                "source_name": package["mv"].get("source_name"),
+                "output_path": package["mv"].get("output_path"),
+                "inspection": package["mv"].get("inspection"),
                 "mapping": package["mv"]["mapping"],
                 "snippet": snippet_path,
                 "requires_lua_rom_rebuild": package["mv"]["requires_lua_rom_rebuild"],
@@ -1100,6 +1433,88 @@ class Pm3ExportService:
         })
         return files
 
+    def _key_sound_status(
+        self,
+        project: SongProject,
+        key_sound_paths: dict[str, str],
+    ) -> dict[str, Any]:
+        assets = {asset.id: asset for asset in project.key_sounds}
+        items: list[dict[str, Any]] = []
+        for asset_id, logical_path in sorted(
+            key_sound_paths.items(), key=lambda item: item[1]
+        ):
+            asset = assets.get(asset_id)
+            if asset is None or not self._requires_custom_key_sound(asset, logical_path):
+                continue
+            reference = self._key_sound_resource_ref(asset)
+            status = self._resource_status(project, reference)
+            items.append({
+                "asset_id": asset_id,
+                "name": asset.name,
+                "logical_path": logical_path.lstrip("./"),
+                **status,
+            })
+        missing = [item for item in items if not item["available"]]
+        transcoder_available = shutil.which("ffmpeg") is not None
+        return {
+            "complete": not missing and (not items or transcoder_available),
+            "required_count": len(items),
+            "available_count": len(items) - len(missing),
+            "missing_count": len(missing),
+            "transcoder_available": transcoder_available,
+            "items": items,
+        }
+
+    def _prepare_key_sounds(
+        self,
+        project: SongProject,
+        key_sound_paths: dict[str, str],
+    ) -> tuple[Pm3RomKeySound, ...]:
+        assets = {asset.id: asset for asset in project.key_sounds}
+        result: list[Pm3RomKeySound] = []
+        for asset_id, logical_path in sorted(
+            key_sound_paths.items(), key=lambda item: item[1]
+        ):
+            asset = assets.get(asset_id)
+            if asset is None or not self._requires_custom_key_sound(asset, logical_path):
+                continue
+            reference = self._key_sound_resource_ref(asset)
+            if reference is None:
+                raise Pm3ExportError(f"Key 音 {asset.name} 缺少可打包的音频资源")
+            try:
+                source = self._resolve_resource(project, reference)
+                payload = convert_pm3_key_sound(source)
+            except (
+                Pm3ExportError,
+                Pm3ResourceError,
+                Pm3WorkspaceError,
+                ProjectAssetError,
+                ProjectNotFoundError,
+                OSError,
+            ) as exc:
+                raise Pm3ExportError(f"Key 音 {asset.name} 转换失败：{exc}") from exc
+            result.append(Pm3RomKeySound(
+                relative_path=logical_path.lstrip("./"),
+                payload=payload,
+            ))
+        return tuple(result)
+
+    @staticmethod
+    def _requires_custom_key_sound(asset: Any, logical_path: str) -> bool:
+        extension = asset.extensions.get("pm3", {})
+        raw_path = extension.get("raw_path") if isinstance(extension, dict) else None
+        normalized = logical_path.replace("\\", "/").lstrip("./").casefold()
+        return not raw_path and normalized.startswith("note/b2p_") and normalized.endswith(".wav")
+
+    @staticmethod
+    def _key_sound_resource_ref(asset: Any) -> dict[str, Any] | None:
+        for namespace in ("editor", "bms", "bmson", "pm3"):
+            extension = asset.extensions.get(namespace)
+            reference = extension.get("resource") if isinstance(extension, dict) else None
+            if isinstance(reference, dict):
+                return reference
+        return None
+
     def _audio_resource_ref(self, project: SongProject, role: str) -> dict[str, Any] | None:
         audio = self._pm3_audio_config(project)
         configured = audio.get(role)
@@ -1122,6 +1537,78 @@ class Pm3ExportService:
             return {}
         audio = package.get("audio")
         return audio if isinstance(audio, dict) else {}
+
+    @staticmethod
+    def _pm3_mv_config(project: SongProject) -> dict[str, Any]:
+        package = project.game_specific_data.get("pm3_package")
+        if not isinstance(package, dict):
+            return {}
+        mv = package.get("mv")
+        return mv if isinstance(mv, dict) else {}
+
+    def _mv_status(self, project: SongProject, mv_id: int) -> dict[str, Any]:
+        if mv_id in PM3_MV_IDS:
+            return {
+                "id": mv_id,
+                "custom": False,
+                "available": True,
+                "source_name": None,
+                "output_path": None,
+                "inspection": None,
+            }
+        config = self._pm3_mv_config(project)
+        reference = config.get("resource")
+        base = {
+            "id": mv_id,
+            "custom": True,
+            "source_name": config.get("source_name"),
+            "output_path": f"media/ui/mv/mv{mv_id}.swf",
+            "inspection": config.get("inspection"),
+        }
+        if config.get("id") != mv_id or not isinstance(reference, dict):
+            return {**base, "available": False}
+        status = self._resource_status(project, reference)
+        if not status["available"]:
+            return {**base, **status, "available": False}
+        try:
+            payload = self._read_resource(project, reference)
+            inspection = inspect_pm3_mv_swf(payload)
+        except (
+            Pm3ExportError,
+            Pm3ResourceError,
+            Pm3WorkspaceError,
+            ProjectAssetError,
+            ProjectNotFoundError,
+            OSError,
+        ) as exc:
+            return {
+                **base,
+                **status,
+                "available": False,
+                "error": f"自定义 MV {mv_id} 校验失败：{exc}",
+            }
+        return {**base, **status, "available": True, "inspection": inspection}
+
+    def _prepare_custom_mv(
+        self,
+        project: SongProject,
+        mv_id: int,
+    ) -> Pm3RomMv | None:
+        if mv_id in PM3_MV_IDS:
+            return None
+        status = self._mv_status(project, mv_id)
+        if not status["available"]:
+            raise Pm3ExportError(
+                status.get("error")
+                or f"自定义 MV {mv_id} 尚未上传或与当前项目配置不一致"
+            )
+        reference = self._pm3_mv_config(project).get("resource")
+        if not isinstance(reference, dict):
+            raise Pm3ExportError(f"自定义 MV {mv_id} 的资源引用缺失")
+        return Pm3RomMv(
+            mv_id=mv_id,
+            payload=self._read_resource(project, reference),
+        )
 
     def _resource_status(
         self,
@@ -1174,9 +1661,11 @@ class Pm3ExportService:
 
     @staticmethod
     def _validate_mv_id(mv_id: int) -> None:
-        if mv_id not in PM3_MV_IDS:
-            allowed = ", ".join(str(value) for value in PM3_MV_IDS)
-            raise Pm3ExportError(f"PM3 MV ID 无效；可用值为 {allowed}")
+        if mv_id not in PM3_MV_IDS and mv_id not in PM3_CUSTOM_MV_IDS:
+            builtins = ", ".join(str(value) for value in PM3_MV_IDS)
+            raise Pm3ExportError(
+                f"PM3 MV ID 无效；内置值为 {builtins}，自定义值为 20..99"
+            )
 
     @staticmethod
     def _validate_resource_profile(resource_profile: str) -> None:

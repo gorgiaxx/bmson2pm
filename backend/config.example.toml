@@ -1,3 +1,4 @@
 [pm3]
 game_root = "/partition3"
 rewrite_root = "/partition4"
+mirror_root = "/path/to/offline/ftp/pm3"

@@ -53,6 +53,7 @@ class Pm3BuildResult:
     slot: int
     warnings: list[str]
     stats: dict[str, Any]
+    key_sound_paths: dict[str, str]
 
 
 class Pm3Adapter(ChartFormatAdapter):
@@ -373,8 +374,19 @@ class Pm3Adapter(ChartFormatAdapter):
         source_document = self._source_document(project)
         bpm_changes = self._build_bpm_changes(project, warnings)
         rhythm_changes = self._build_rhythm_changes(project)
+        lanes = {lane.id: lane for lane in project.lanes}
+        referenced_asset_ids = {
+            asset_id
+            for note in chart.notes
+            if (lane := lanes.get(note.lane_id)) is not None
+            if (asset_id := note.key_sound_id or lane.default_key_sound_id)
+        }
         wavs, wav_by_asset = self._build_wavs(
-            project, source_document, warnings, target_song_id=song_id,
+            project,
+            source_document,
+            warnings,
+            referenced_asset_ids=referenced_asset_ids,
+            target_song_id=song_id,
         )
         events = self._build_events(project, difficulty, wavs, wav_by_asset, warnings)
         playable_count = sum(
@@ -438,6 +450,11 @@ class Pm3Adapter(ChartFormatAdapter):
             "auxiliary_events": len(events) - playable_count,
             "event_count": len(events),
             "wav_count": len(wavs),
+            "custom_key_sound_count": sum(
+                raw_path.replace("\\", "/").lstrip("./").casefold().startswith("note/b2p_")
+                for asset_id, index in wav_by_asset.items()
+                if asset_id in referenced_asset_ids and (raw_path := wavs[index])
+            ),
             "bpm_change_count": len(bpm_changes),
             "rhythm_change_count": len(rhythm_changes),
             "plaintext_size": len(plaintext),
@@ -454,6 +471,11 @@ class Pm3Adapter(ChartFormatAdapter):
             slot=selected_slot,
             warnings=list(dict.fromkeys(warnings)),
             stats=stats,
+            key_sound_paths={
+                asset_id: wavs[index]
+                for asset_id, index in wav_by_asset.items()
+                if index in wavs
+            },
         )
 
     def round_trip_project(self, project: SongProject, difficulty: DifficultyId) -> dict[str, Any]:
@@ -537,19 +559,31 @@ class Pm3Adapter(ChartFormatAdapter):
         source: Pm3ChartDocument | None,
         warnings: list[str],
         *,
+        referenced_asset_ids: set[str],
         target_song_id: int | None = None,
     ) -> tuple[dict[int, str], dict[str, int]]:
         wavs = dict(source.wavs) if source else {}
+        used = set(wavs)
         if target_song_id is not None:
             replacement = f"./{target_song_id:03d}/BG.wav"
+            background_found = False
             for index, raw_path in list(wavs.items()):
                 if PurePosixPath(raw_path.replace("\\", "/")).name.lower() == "bg.wav":
+                    background_found = True
                     if raw_path != replacement:
                         wavs[index] = replacement
                         warnings.append(f"背景音乐逻辑路径已改为 {replacement}")
+            if not background_found and self._has_prepared_background(project):
+                index = next((candidate for candidate in range(1024) if candidate not in used), None)
+                if index is None:
+                    raise Pm3FormatError("PM3 WAV 索引已超过 1024 个")
+                wavs[index] = replacement
+                used.add(index)
+                warnings.append(f"已加入背景音乐 WAV {index}：{replacement}")
         by_asset: dict[str, int] = {}
-        used = set(wavs)
         for asset in project.key_sounds:
+            if asset.id not in referenced_asset_ids:
+                continue
             extension = asset.extensions.get("pm3", {})
             index = extension.get("wav_index") if isinstance(extension, dict) else None
             if not isinstance(index, int) or index < 0 or index > 1023:
@@ -560,9 +594,12 @@ class Pm3Adapter(ChartFormatAdapter):
             used.add(index)
             raw_path = extension.get("raw_path") if isinstance(extension, dict) else None
             if not isinstance(raw_path, str) or not raw_path:
-                cleaned = asset.filename.replace("\\", "/")
-                cleaned = cleaned.removeprefix("media/sound/")
-                raw_path = f"./{cleaned}"
+                if target_song_id is not None:
+                    raw_path = self._custom_key_sound_path(target_song_id, asset.id)
+                else:
+                    cleaned = asset.filename.replace("\\", "/")
+                    cleaned = cleaned.removeprefix("media/sound/")
+                    raw_path = f"./{cleaned}"
             wavs[index] = raw_path
             by_asset[asset.id] = index
         if not wavs:
@@ -633,6 +670,23 @@ class Pm3Adapter(ChartFormatAdapter):
             if event.track < 0 or event.track > 23 or event.tick < 0 or event.tick > 0x3FFF:
                 raise Pm3FormatError("PM3 辅助事件的 track 或 tick 超出范围")
             events.append(event)
+        if (
+            self._has_prepared_background(project)
+            and not any(event.track == self.BACKGROUND_TRACK for event in events)
+        ):
+            background_wav = next(
+                (
+                    index
+                    for index, raw_path in wavs.items()
+                    if PurePosixPath(raw_path.replace("\\", "/")).name.casefold() == "bg.wav"
+                ),
+                None,
+            )
+            if background_wav is not None:
+                events.append(Pm3Event(
+                    self.BACKGROUND_TRACK, 0, background_wav, 127, 0, 0, 0, 0
+                ))
+                warnings.append("已在 Track 16 的 Tick 0 加入背景音乐触发事件")
         assets = {asset.id: asset for asset in project.key_sounds}
         for line_number, note in enumerate(chart.notes, start=1):
             lane = lanes.get(note.lane_id)
@@ -698,6 +752,17 @@ class Pm3Adapter(ChartFormatAdapter):
         if overflowing:
             raise Pm3FormatError(f"PM3 单轨最多 512 个事件，超出轨道：{overflowing}")
         return sorted(events, key=lambda item: (item.track, item.tick, item.line_number, item.hold_end))
+
+    @staticmethod
+    def _has_prepared_background(project: SongProject) -> bool:
+        package = project.game_specific_data.get("pm3_package")
+        audio = package.get("audio") if isinstance(package, dict) else None
+        return isinstance(audio, dict) and isinstance(audio.get("background"), dict)
+
+    @staticmethod
+    def _custom_key_sound_path(song_id: int, asset_id: str) -> str:
+        digest = hashlib.sha256(asset_id.encode("utf-8")).hexdigest()[:16]
+        return f"./note/b2p_{song_id:03d}_{digest}.wav"
 
     @staticmethod
     def _event_rows(value: Any) -> list[dict[str, Any]]:

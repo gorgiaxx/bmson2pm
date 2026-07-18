@@ -46,8 +46,13 @@ from .services.pm3_export import Pm3ExportError, Pm3ExportService
 from .services.pm3_ota_audit import Pm3OtaAuditError, Pm3OtaAuditor
 from .services.pm3_resources import (
     MAX_PM3_AUDIO_BYTES,
+    MAX_PM3_MV_BYTES,
+    PM3_CUSTOM_MV_IDS,
+    PM3_MV_IDS,
     Pm3ResourceError,
+    build_pm3_mv_state_preview,
     prepare_pm3_audio,
+    prepare_pm3_mv,
 )
 from .services.pm3_workspace import Pm3Workspace, Pm3WorkspaceError
 from .storage import ProjectAssetError, ProjectNotFoundError, ProjectStore
@@ -74,7 +79,7 @@ class Pm3ExportRequest(BaseModel):
     song_id: int | None = None
     include_song_list: bool = False
     include_resources: bool = False
-    mv_id: int = 0
+    mv_id: int = Field(default=0, ge=0, le=99)
     resource_profile: Literal["extracted-media-overlay", "squashfs-ota"] = "extracted-media-overlay"
 
 
@@ -83,12 +88,12 @@ class Pm3VersionEntryRequest(BaseModel):
     difficulty: DifficultyId
     song_id: int = Field(ge=0, le=999)
     slot: int = Field(default=0, ge=0, le=9)
-    mv_id: int = Field(default=0, ge=0, le=19)
+    mv_id: int = Field(default=0, ge=0, le=99)
 
 
 class Pm3VersionRequest(BaseModel):
     version_name: str = Field(pattern=r"^ver[0-9]{3}$")
-    entries: list[Pm3VersionEntryRequest] = Field(min_length=1, max_length=50)
+    entries: list[Pm3VersionEntryRequest] = Field(min_length=1, max_length=250)
 
 
 class Pm3OtaChainRequest(BaseModel):
@@ -388,6 +393,27 @@ def create_app(
     def pm3_roots() -> list[dict[str, object]]:
         return app.state.pm3_workspace.root_descriptors()
 
+    @app.get("/api/pm3/ota/mirror")
+    def audit_pm3_ota_mirror(
+        generation: int | None = Query(None, ge=0, le=999),
+        installed_version: int | None = Query(None, ge=0, le=999),
+        installed_edition: int | None = Query(None, ge=0, le=999),
+        downloaded_version: int | None = Query(None, ge=0, le=999),
+        downloaded_edition: int | None = Query(None, ge=0, le=999),
+        verify_payloads: bool = Query(False),
+    ) -> dict[str, object]:
+        try:
+            return app.state.pm3_ota_audit.audit_mirror(
+                generation=generation,
+                installed_version=installed_version,
+                installed_edition=installed_edition,
+                downloaded_version=downloaded_version,
+                downloaded_edition=downloaded_edition,
+                verify_payloads=verify_payloads,
+            )
+        except (Pm3OtaAuditError, Pm3WorkspaceError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.get("/api/pm3/tree")
     def pm3_tree(
         root_id: str = Query(..., alias="root"),
@@ -564,6 +590,105 @@ def create_app(
         except (Pm3ResourceError, OSError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.post(
+        "/api/projects/{project_id}/pm3/mv",
+        response_model=SongProject,
+    )
+    async def prepare_project_pm3_mv(
+        project_id: str,
+        file: UploadFile = File(...),
+        mv_id: int = Form(..., ge=20, le=99),
+    ) -> SongProject:
+        project = get_project(project_id)
+        payload = await file.read(MAX_PM3_MV_BYTES + 1)
+        try:
+            return prepare_pm3_mv(
+                app.state.store,
+                project,
+                filename=file.filename or f"mv{mv_id}.swf",
+                payload=payload,
+                mv_id=mv_id,
+            )
+        except (Pm3ResourceError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/projects/{project_id}/pm3/mv-preview/mvctrl/mvctrl.swf")
+    def preview_project_pm3_mv_controller(project_id: str) -> FileResponse:
+        get_project(project_id)
+        try:
+            resource = app.state.pm3_workspace.resolve(
+                "game", "media/ui/mvctrl/mvctrl.swf", expect="file"
+            )
+        except (Pm3WorkspaceError, OSError) as exc:
+            raise HTTPException(status_code=404, detail="PM3 MV 控制器不可用") from exc
+        if resource.stat().st_size > MAX_PM3_MV_BYTES:
+            raise HTTPException(status_code=413, detail="PM3 MV 控制器超过大小限制")
+        return FileResponse(
+            resource,
+            media_type="application/x-shockwave-flash",
+            headers={
+                "Cache-Control": "private, max-age=3600",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.get("/api/projects/{project_id}/pm3/mv-preview/mv/mv{mv_id}.swf")
+    def preview_project_pm3_mv_resource(
+        project_id: str,
+        mv_id: int,
+        state: Literal["low", "middle", "high", "full"] | None = Query(None),
+    ) -> Response:
+        project = get_project(project_id)
+        if mv_id in PM3_MV_IDS:
+            try:
+                resource = app.state.pm3_workspace.resolve(
+                    "game", f"media/ui/mv/mv{mv_id}.swf", expect="file"
+                )
+            except (Pm3WorkspaceError, OSError) as exc:
+                raise HTTPException(status_code=404, detail=f"PM3 MV {mv_id} 不可用") from exc
+        elif mv_id in PM3_CUSTOM_MV_IDS:
+            package = project.game_specific_data.get("pm3_package")
+            mv = package.get("mv") if isinstance(package, dict) else None
+            reference = mv.get("resource") if isinstance(mv, dict) else None
+            if (
+                not isinstance(mv, dict)
+                or mv.get("id") != mv_id
+                or not isinstance(reference, dict)
+                or reference.get("project_id") != project_id
+                or not isinstance(reference.get("path"), str)
+            ):
+                raise HTTPException(status_code=404, detail=f"项目未配置 PM3 MV {mv_id}")
+            try:
+                resource = app.state.store.asset_path(project_id, reference["path"])
+            except (ProjectNotFoundError, ProjectAssetError) as exc:
+                raise HTTPException(status_code=404, detail=f"PM3 MV {mv_id} 资源不存在") from exc
+        else:
+            raise HTTPException(status_code=404, detail=f"PM3 MV {mv_id} 不存在")
+
+        if resource.suffix.casefold() != ".swf":
+            raise HTTPException(status_code=415, detail="PM3 MV 预览仅支持 SWF")
+        if resource.stat().st_size > MAX_PM3_MV_BYTES:
+            raise HTTPException(status_code=413, detail="PM3 MV 超过大小限制")
+        headers = {
+            "Cache-Control": "private, max-age=3600",
+            "X-Content-Type-Options": "nosniff",
+        }
+        if state is not None:
+            try:
+                preview_payload = build_pm3_mv_state_preview(resource.read_bytes(), state)
+            except (Pm3ResourceError, OSError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            return Response(
+                content=preview_payload,
+                media_type="application/x-shockwave-flash",
+                headers={**headers, "Cache-Control": "no-store"},
+            )
+        return FileResponse(
+            resource,
+            media_type="application/x-shockwave-flash",
+            headers=headers,
+        )
+
     @app.get("/api/projects/{project_id}/export/pm3/preview")
     def preview_pm3_export(
         project_id: str,
@@ -572,7 +697,7 @@ def create_app(
         song_id: int | None = Query(None, ge=0, le=999),
         include_song_list: bool = Query(False),
         include_resources: bool = Query(False),
-        mv_id: int = Query(0, ge=0, le=19),
+        mv_id: int = Query(0, ge=0, le=99),
         resource_profile: Literal["extracted-media-overlay", "squashfs-ota"] = Query(
             "extracted-media-overlay"
         ),

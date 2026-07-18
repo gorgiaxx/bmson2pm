@@ -27,6 +27,7 @@ import type {
   Pm3ResourceProfile,
   SongProject,
 } from '../types'
+import { Pm3MvPreview } from './Pm3MvPreview'
 
 interface Pm3ExportDialogProps {
   project: SongProject
@@ -61,6 +62,15 @@ function pm3AudioConfig(project: SongProject): Record<string, unknown> {
     : {}
 }
 
+function pm3MvConfig(project: SongProject): Record<string, unknown> {
+  const packageConfig = project.game_specific_data.pm3_package
+  if (!packageConfig || typeof packageConfig !== 'object' || Array.isArray(packageConfig)) return {}
+  const mv = (packageConfig as Record<string, unknown>).mv
+  return mv && typeof mv === 'object' && !Array.isArray(mv)
+    ? mv as Record<string, unknown>
+    : {}
+}
+
 export function Pm3ExportDialog({
   project,
   difficulty,
@@ -70,7 +80,14 @@ export function Pm3ExportDialog({
 }: Pm3ExportDialogProps) {
   const sourceSlot = project.game_specific_data.pm3_slot
   const initialAudio = pm3AudioConfig(project)
+  const initialMv = pm3MvConfig(project)
+  const configuredMvId = typeof initialMv.id === 'number'
+    && initialMv.id >= 20 && initialMv.id <= 99
+    ? initialMv.id
+    : null
+  const projectMvId = project.mv_configuration.pm3_mv_id
   const audioInputRef = useRef<HTMLInputElement>(null)
+  const mvInputRef = useRef<HTMLInputElement>(null)
   const [slot, setSlot] = useState(typeof sourceSlot === 'number' && sourceSlot >= 0 && sourceSlot <= 9 ? sourceSlot : 0)
   const [songIdInput, setSongIdInput] = useState(() => initialSongId(project))
   const [targets, setTargets] = useState<Pm3ExportTarget[]>([])
@@ -78,7 +95,12 @@ export function Pm3ExportDialog({
   const [includeSongList, setIncludeSongList] = useState(false)
   const [includeResources, setIncludeResources] = useState(false)
   const [resourceProfile, setResourceProfile] = useState<Pm3ResourceProfile>('extracted-media-overlay')
-  const [mvId, setMvId] = useState(0)
+  const [mvId, setMvId] = useState(
+    typeof projectMvId === 'number'
+      && (PM3_MV_IDS.includes(projectMvId) || (projectMvId >= 20 && projectMvId <= 99))
+      ? projectMvId
+      : 0,
+  )
   const [audioFile, setAudioFile] = useState<File | null>(null)
   const [previewStart, setPreviewStart] = useState(
     typeof initialAudio.preview_start === 'number' ? initialAudio.preview_start : project.metadata.preview_time,
@@ -87,6 +109,9 @@ export function Pm3ExportDialog({
     typeof initialAudio.preview_duration === 'number' ? initialAudio.preview_duration : 12,
   )
   const [audioRevision, setAudioRevision] = useState(0)
+  const [mvFile, setMvFile] = useState<File | null>(null)
+  const [customMvId, setCustomMvId] = useState(configuredMvId ?? 20)
+  const [mvRevision, setMvRevision] = useState(0)
   const [preview, setPreview] = useState<Pm3ExportPreview | null>(null)
   const [report, setReport] = useState<Pm3ExportReport | null>(null)
   const [busy, setBusy] = useState(false)
@@ -128,7 +153,7 @@ export function Pm3ExportDialog({
         .catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : 'PM3 预检失败') })
     }, 120)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [audioRevision, difficulty, includeResources, includeSongList, mvId, project.id, resourceProfile, slot, songId])
+  }, [audioRevision, difficulty, includeResources, includeSongList, mvId, mvRevision, project.id, resourceProfile, slot, songId])
 
   useEffect(() => {
     if (!includeSongList && previewTab === 'song_list') setPreviewTab('chart')
@@ -171,6 +196,24 @@ export function Pm3ExportDialog({
     }
   }
 
+  const prepareMv = async () => {
+    if (!mvFile || customMvId < 20 || customMvId > 99) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.saveProject(project)
+      const updated = await api.preparePm3Mv(project.id, mvFile, customMvId)
+      onProjectChange(updated)
+      setMvFile(null)
+      setMvId(customMvId)
+      setMvRevision((value) => value + 1)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'PM3 MV 校验或保存失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const rollback = async () => {
     if (!report) return
     setBusy(true)
@@ -191,6 +234,9 @@ export function Pm3ExportDialog({
   const warnings = report?.warnings ?? currentPreview?.warnings ?? []
   const verified = report?.round_trip.passed ?? currentPreview?.stats.round_trip_verified === true
   const resourcePackage = report?.resource_package ?? currentPreview?.resource_package
+  const selectableMvIds = configuredMvId !== null && !PM3_MV_IDS.includes(configuredMvId)
+    ? [...PM3_MV_IDS, configuredMvId]
+    : PM3_MV_IDS
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
@@ -302,12 +348,46 @@ export function Pm3ExportDialog({
                   <label>
                     <span><Video size={13} />MV 预设</span>
                     <select value={mvId} onChange={(event) => setMvId(Number(event.target.value))} disabled={busy}>
-                      {PM3_MV_IDS.map((value) => <option key={value} value={value}>MV {value}</option>)}
+                      {selectableMvIds.map((value) => (
+                        <option key={value} value={value}>
+                          MV {value}{value >= 20 ? ' · 自定义' : ''}
+                        </option>
+                      ))}
                     </select>
                   </label>
                   <button type="button" className="button primary pm3-prepare-audio" onClick={() => void prepareAudio()} disabled={busy || !audioFile || !Number.isFinite(previewStart) || !Number.isFinite(previewDuration)}>
                     {busy ? <LoaderCircle className="spin" size={13} /> : <Music2 size={13} />}
                     生成音频资源
+                  </button>
+                </div>
+                <div className="pm3-mv-upload">
+                  <label>
+                    <span><Video size={13} />自定义 MV</span>
+                    <button type="button" className="button secondary" onClick={() => mvInputRef.current?.click()} disabled={busy}>
+                      <Upload size={13} />
+                      <span>{mvFile?.name ?? (typeof initialMv.source_name === 'string' ? initialMv.source_name : '选择 SWF')}</span>
+                    </button>
+                  </label>
+                  <label>
+                    <span>MV ID</span>
+                    <input
+                      type="number"
+                      min="20"
+                      max="99"
+                      step="1"
+                      value={customMvId}
+                      onChange={(event) => setCustomMvId(Number(event.target.value))}
+                      disabled={busy}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="button secondary"
+                    onClick={() => void prepareMv()}
+                    disabled={busy || !mvFile || customMvId < 20 || customMvId > 99}
+                  >
+                    {busy ? <LoaderCircle className="spin" size={13} /> : <Video size={13} />}
+                    校验并保存 MV
                   </button>
                 </div>
                 <input
@@ -320,24 +400,46 @@ export function Pm3ExportDialog({
                     event.currentTarget.value = ''
                   }}
                 />
+                <input
+                  ref={mvInputRef}
+                  type="file"
+                  accept=".swf,application/x-shockwave-flash"
+                  hidden
+                  onChange={(event) => {
+                    setMvFile(event.target.files?.[0] ?? null)
+                    event.currentTarget.value = ''
+                  }}
+                />
                 {resourcePackage && (
-                  <div className={`pm3-resource-status ${resourcePackage.rom ? 'has-rom' : ''}`} aria-label="PM3 资源状态">
-                    <span className={resourcePackage.audio.background.available ? 'ready' : ''}>
-                      <i />主音乐<code>{resourcePackage.audio.background.output_path}</code>
-                    </span>
-                    <span className={resourcePackage.audio.preview.available ? 'ready' : ''}>
-                      <i />试听<code>{resourcePackage.audio.preview.output_path}</code>
-                    </span>
-                    <span className="ready"><i />MV<code>{resourcePackage.mv.mapping}</code></span>
-                    {resourcePackage.rom && (
-                      <span className={resourcePackage.rom.available ? 'ready' : ''}>
-                        <i />ROM
-                        <code>{resourcePackage.rom.available
-                          ? `BG/PRE ${resourcePackage.rom.bundle} · LUA`
-                          : resourcePackage.rom.missing.join('、')}</code>
+                  <>
+                    <div className={`pm3-resource-status ${resourcePackage.rom ? 'has-rom' : ''}`} aria-label="PM3 资源状态">
+                      <span className={resourcePackage.audio.background.available ? 'ready' : ''}>
+                        <i />主音乐<code>{resourcePackage.audio.background.output_path}</code>
                       </span>
-                    )}
-                  </div>
+                      <span className={resourcePackage.audio.preview.available ? 'ready' : ''}>
+                        <i />试听<code>{resourcePackage.audio.preview.output_path}</code>
+                      </span>
+                      <span className={resourcePackage.mv.available ? 'ready' : ''}>
+                        <i />MV
+                        <code>{resourcePackage.mv.custom
+                          ? resourcePackage.mv.output_path ?? resourcePackage.mv.mapping
+                          : resourcePackage.mv.mapping}</code>
+                      </span>
+                      {resourcePackage.rom && (
+                        <span className={resourcePackage.rom.available ? 'ready' : ''}>
+                          <i />ROM
+                          <code>{resourcePackage.rom.available
+                            ? `BG/PRE ${resourcePackage.rom.bundle} · LUA`
+                            : resourcePackage.rom.missing.join('、')}</code>
+                        </span>
+                      )}
+                    </div>
+                    <Pm3MvPreview
+                      projectId={project.id}
+                      mvId={resourcePackage.mv.id}
+                      available={resourcePackage.mv.available}
+                    />
+                  </>
                 )}
               </fieldset>
             </>

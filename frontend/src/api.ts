@@ -14,7 +14,12 @@ import type {
   Pm3ResourceProfile,
   Pm3ExportPreview,
   Pm3ExportReport,
+  Pm3ExportSummary,
   Pm3ExportTarget,
+  Pm3OtaAudit,
+  Pm3OtaChain,
+  Pm3OtaMirrorAudit,
+  Pm3OtaMirrorOptions,
   Pm3VersionCandidate,
   Pm3VersionEntry,
   Pm3VersionPreview,
@@ -163,6 +168,28 @@ export const api = {
 
   pm3ExportTargets: () => jsonRequest<Pm3ExportTarget[]>('/api/pm3/export-targets'),
 
+  pm3Exports: () => jsonRequest<Pm3ExportSummary[]>('/api/pm3/exports'),
+
+  pm3ExportAudit: (exportId: string) =>
+    jsonRequest<Pm3OtaAudit>(`/api/pm3/exports/${encodeURIComponent(exportId)}/audit`),
+
+  pm3AuditChain: (exportIds: string[]) => jsonRequest<Pm3OtaChain>('/api/pm3/exports/audit-chain', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ export_ids: exportIds }),
+  }),
+
+  pm3OtaMirror: (options: Pm3OtaMirrorOptions = {}) => {
+    const query = new URLSearchParams()
+    if (options.generation != null) query.set('generation', String(options.generation))
+    if (options.installedVersion != null) query.set('installed_version', String(options.installedVersion))
+    if (options.installedEdition != null) query.set('installed_edition', String(options.installedEdition))
+    if (options.downloadedVersion != null) query.set('downloaded_version', String(options.downloadedVersion))
+    if (options.downloadedEdition != null) query.set('downloaded_edition', String(options.downloadedEdition))
+    query.set('verify_payloads', String(options.verifyPayloads ?? false))
+    return jsonRequest<Pm3OtaMirrorAudit>(`/api/pm3/ota/mirror?${query}`)
+  },
+
   pm3VersionCandidates: () => jsonRequest<Pm3VersionCandidate[]>('/api/pm3/version-candidates'),
 
   pm3VersionPreview: (versionName: string, entries: Pm3VersionEntry[]) =>
@@ -190,6 +217,16 @@ export const api = {
     body.append('preview_start', String(previewStart))
     body.append('preview_duration', String(previewDuration))
     return jsonRequest<SongProject>(`/api/projects/${projectId}/pm3/audio`, {
+      method: 'POST',
+      body,
+    })
+  },
+
+  preparePm3Mv: (projectId: string, file: File, mvId: number) => {
+    const body = new FormData()
+    body.append('file', file)
+    body.append('mv_id', String(mvId))
+    return jsonRequest<SongProject>(`/api/projects/${projectId}/pm3/mv`, {
       method: 'POST',
       body,
     })
