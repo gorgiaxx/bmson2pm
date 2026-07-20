@@ -29,7 +29,11 @@ class Pm3ResourceError(ValueError):
     pass
 
 
-def inspect_pm3_mv_swf(payload: bytes) -> dict[str, Any]:
+def inspect_pm3_mv_swf(
+    payload: bytes,
+    *,
+    require_state_labels: bool = True,
+) -> dict[str, Any]:
     if len(payload) < 16 or len(payload) > MAX_PM3_MV_BYTES:
         raise Pm3ResourceError("PM3 MV SWF 必须在 16 字节到 128 MB 之间")
     signature = payload[:3]
@@ -118,12 +122,13 @@ def inspect_pm3_mv_swf(payload: bytes) -> dict[str, Any]:
         raise Pm3ResourceError("PM3 MV SWF 缺少 End 标签")
     if has_as3:
         raise Pm3ResourceError("PM3 Scaleform 运行时只支持 AS2 MV，不能包含 AS3 DoABC")
-    required_labels = {"low", "middle", "high", "full"}
-    missing_labels = sorted(required_labels - labels)
-    if missing_labels:
-        raise Pm3ResourceError(
-            "PM3 MV 缺少控制器状态帧：" + "、".join(missing_labels)
-        )
+    if require_state_labels:
+        required_labels = {"low", "middle", "high", "full"}
+        missing_labels = sorted(required_labels - labels)
+        if missing_labels:
+            raise Pm3ResourceError(
+                "PM3 MV 缺少控制器状态帧：" + "、".join(missing_labels)
+            )
     return {
         "signature": signature.decode("ascii"),
         "version": version,
@@ -155,8 +160,16 @@ def build_pm3_mv_state_preview(payload: bytes, state: str) -> bytes:
 
     nbits = _swf_bits(body, 0, 5)
     tags_offset = (5 + nbits * 4 + 7) // 8 + 4
+    # PM3 MV files define each state on a separate root-timeline frame. The
+    # images and sprites for later states are also defined inside those frames,
+    # so an ActionGoToLabel inserted into frame zero runs before a large SWF has
+    # loaded the destination frame. Flatten all tags through the requested
+    # frame into one frame instead. This produces a self-contained preview and
+    # does not depend on AVM1 loading timing or ExternalInterface support.
     offset = tags_offset
-    show_frame_offset: int | None = None
+    frame = 0
+    target_frame: int | None = None
+    preview_tags = bytearray()
     while offset + 2 <= len(body):
         tag_start = offset
         header = int.from_bytes(body[offset:offset + 2], "little")
@@ -168,21 +181,36 @@ def build_pm3_mv_state_preview(payload: bytes, state: str) -> bytes:
                 break
             tag_length = int.from_bytes(body[offset:offset + 4], "little")
             offset += 4
-        if offset + tag_length > len(body):
-            break
-        if tag_code == 1:
-            show_frame_offset = tag_start
-            break
-        offset += tag_length
-    if show_frame_offset is None:
-        raise Pm3ResourceError("PM3 MV SWF 缺少 ShowFrame 标签")
+        tag_end = offset + tag_length
+        if tag_end > len(body):
+            raise Pm3ResourceError("PM3 MV SWF 标签越过文件结尾")
+        tag = body[offset:tag_end]
+        offset = tag_end
 
-    label = state.encode("ascii") + b"\0"
-    action = b"\x8c" + len(label).to_bytes(2, "little") + label + b"\x07\0"
-    if len(action) >= 0x3F:
-        raise Pm3ResourceError("PM3 MV 预览动作过长")
-    do_action = ((12 << 6) | len(action)).to_bytes(2, "little") + action
-    preview_body = body[:show_frame_offset] + do_action + body[show_frame_offset:]
+        if tag_code == 43:
+            label = tag.split(b"\0", 1)[0].decode("ascii", errors="ignore")
+            if label == state:
+                target_frame = frame
+        elif tag_code not in {0, 1, 12}:
+            preview_tags.extend(body[tag_start:tag_end])
+
+        if tag_code == 1:
+            if target_frame == frame:
+                break
+            frame += 1
+        elif tag_code == 0:
+            break
+    else:
+        raise Pm3ResourceError("PM3 MV SWF 缺少 End 标签")
+
+    if target_frame is None or frame != target_frame:
+        raise Pm3ResourceError(f"PM3 MV 无法定位 {state} 状态帧")
+
+    timeline_header = bytearray(body[:tags_offset])
+    timeline_header[tags_offset - 2:tags_offset] = (1).to_bytes(2, "little")
+    stop_action = ((12 << 6) | 2).to_bytes(2, "little") + b"\x07\0"
+    show_frame = (1 << 6).to_bytes(2, "little")
+    preview_body = bytes(timeline_header + preview_tags + stop_action + show_frame + b"\0\0")
     declared_length = len(preview_body) + 8
     header = payload[:4] + declared_length.to_bytes(4, "little")
     if payload[:3] == b"CWS":

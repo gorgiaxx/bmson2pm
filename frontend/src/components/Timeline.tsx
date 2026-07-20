@@ -427,13 +427,19 @@ export function Timeline({
     const laneId = project.lanes[laneIndex].id
     setActiveLane(laneId)
     if (point.x < labelWidth) return
+    const hit = hitTest(point)
     if (tool === 'draw') {
+      if (hit) {
+        selectOnly(hit.note.id)
+        onTriggerNote(hit.note)
+        return
+      }
       addNote(laneId, xToPulse(point.x))
       onTriggerLane(laneId)
       return
     }
-    const hit = hitTest(point)
     if (hit) {
+      onTriggerNote(hit.note)
       let dragIds: string[]
       if (event.shiftKey || event.metaKey || event.ctrlKey) {
         if (selectedIds.has(hit.note.id)) {
@@ -630,10 +636,6 @@ export function Timeline({
         onPointerCancel={cancelPointer}
         onPointerLeave={() => { if (!drag) setPlayheadHovered(false) }}
         onContextMenu={handleContextMenu}
-        onDoubleClick={(event) => {
-          const hit = hitTest(pointFromEvent(event))
-          if (hit) onTriggerNote(hit.note)
-        }}
       />
       <div className={`timeline-track-headers${resizingLabels ? ' resizing' : ''}`} style={{ width: labelWidth }}>
         <div className="music-track-header">

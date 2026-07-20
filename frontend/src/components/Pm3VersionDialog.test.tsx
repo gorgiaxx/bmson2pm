@@ -14,7 +14,7 @@ import { Pm3VersionDialog } from './Pm3VersionDialog'
 const candidates: Pm3VersionCandidate[] = [
   {
     project_id: 'alpha', title: 'Alpha', artist: 'Artist A', song_id: 42,
-    slot: 2, mv_id: 14, audio_ready: true, updated_at: '2026-07-16T00:00:00Z',
+    slot: 2, mv_id: 14, music_style: 0, guest_available: true, audio_ready: true, updated_at: '2026-07-16T00:00:00Z',
     difficulties: [{ id: 'easy', label: '初级', level: 3, notes: 120 }],
     audio: {
       background: { available: true, source: 'project:bg', size: 100 },
@@ -23,7 +23,7 @@ const candidates: Pm3VersionCandidate[] = [
   },
   {
     project_id: 'beta', title: 'Beta', artist: 'Artist B', song_id: null,
-    slot: 3, mv_id: 18, audio_ready: true, updated_at: '2026-07-15T00:00:00Z',
+    slot: 3, mv_id: 18, music_style: 1, guest_available: true, audio_ready: true, updated_at: '2026-07-15T00:00:00Z',
     difficulties: [{ id: 'hard', label: '高级', level: 7, notes: 320 }],
     audio: {
       background: { available: true, source: 'project:bg', size: 120 },
@@ -37,10 +37,14 @@ function versionPreview(entries: Pm3VersionEntry[]): Pm3VersionPreview {
     const candidate = candidates.find((item) => item.project_id === entry.project_id) as Pm3VersionCandidate
     return {
       song_id: entry.song_id, project_id: entry.project_id, title: candidate.title,
-      artist: candidate.artist, mv_id: entry.mv_id, audio_ready: true,
+      artist: candidate.artist, mv_id: entry.mv_id,
+      music_style: entry.music_style,
+      guest_available: entry.guest_available, audio_ready: true,
       charts: [{
         difficulty: entry.difficulty, difficulty_label: candidate.difficulties[0].label,
         level: candidate.difficulties[0].level, slot: entry.slot,
+        music_style: entry.music_style,
+        guest_available: entry.guest_available,
         filename: `p${String(entry.song_id).padStart(3, '0')}_${entry.difficulty}.enc`,
         note_objects: candidate.difficulties[0].notes,
         event_count: candidate.difficulties[0].notes,
@@ -84,8 +88,8 @@ describe('Pm3VersionDialog', () => {
     )
     const report = {
       ...versionPreview([
-        { project_id: 'alpha', difficulty: 'easy', song_id: 42, slot: 2, mv_id: 14 },
-        { project_id: 'beta', difficulty: 'hard', song_id: 211, slot: 3, mv_id: 18 },
+        { project_id: 'alpha', difficulty: 'easy', song_id: 134, slot: 4, mv_id: 14, music_style: 0, guest_available: true },
+        { project_id: 'beta', difficulty: 'hard', song_id: 150, slot: 0, mv_id: 18, music_style: 2, guest_available: false },
       ]),
       export_id: 'version-1', kind: 'pm3-version', status: 'staged',
       created_at: '2026-07-16T00:00:00Z', filename: 'ver010',
@@ -107,12 +111,22 @@ describe('Pm3VersionDialog', () => {
     )
 
     await waitFor(() => expect(previewMock).toHaveBeenCalledWith('ver010', [{
-      project_id: 'alpha', difficulty: 'easy', song_id: 42, slot: 2, mv_id: 14,
+      project_id: 'alpha', difficulty: 'easy', song_id: 134, slot: 4, mv_id: 14, music_style: 0, guest_available: true,
     }]))
     fireEvent.click(screen.getByRole('checkbox', { name: '选择 Beta' }))
     await waitFor(() => expect(previewMock).toHaveBeenLastCalledWith('ver010', [
-      { project_id: 'alpha', difficulty: 'easy', song_id: 42, slot: 2, mv_id: 14 },
-      { project_id: 'beta', difficulty: 'hard', song_id: 211, slot: 3, mv_id: 18 },
+      { project_id: 'alpha', difficulty: 'easy', song_id: 134, slot: 4, mv_id: 14, music_style: 0, guest_available: true },
+      { project_id: 'beta', difficulty: 'hard', song_id: 150, slot: 0, mv_id: 18, music_style: 1, guest_available: true },
+    ]))
+    fireEvent.change(screen.getByRole('combobox', { name: 'Beta 音乐分类' }), { target: { value: '2' } })
+    await waitFor(() => expect(previewMock).toHaveBeenLastCalledWith('ver010', [
+      { project_id: 'alpha', difficulty: 'easy', song_id: 134, slot: 4, mv_id: 14, music_style: 0, guest_available: true },
+      { project_id: 'beta', difficulty: 'hard', song_id: 150, slot: 0, mv_id: 18, music_style: 2, guest_available: true },
+    ]))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Beta 游客开放' }))
+    await waitFor(() => expect(previewMock).toHaveBeenLastCalledWith('ver010', [
+      { project_id: 'alpha', difficulty: 'easy', song_id: 134, slot: 4, mv_id: 14, music_style: 0, guest_available: true },
+      { project_id: 'beta', difficulty: 'hard', song_id: 150, slot: 0, mv_id: 18, music_style: 2, guest_available: false },
     ]))
     expect((await screen.findAllByText(/ROMS\/lua_script\.rom/)).length).toBeGreaterThan(0)
 
@@ -145,13 +159,13 @@ describe('Pm3VersionDialog', () => {
     )
 
     await waitFor(() => expect(previewMock).toHaveBeenCalledWith('ver010', [
-      { project_id: 'alpha', difficulty: 'easy', song_id: 42, slot: 2, mv_id: 14 },
-      { project_id: 'alpha', difficulty: 'hard', song_id: 42, slot: 2, mv_id: 14 },
+      { project_id: 'alpha', difficulty: 'easy', song_id: 134, slot: 4, mv_id: 14, music_style: 0, guest_available: true },
+      { project_id: 'alpha', difficulty: 'hard', song_id: 134, slot: 4, mv_id: 14, music_style: 0, guest_available: true },
     ]))
 
     fireEvent.click(screen.getByRole('checkbox', { name: 'Alpha 高级' }))
     await waitFor(() => expect(previewMock).toHaveBeenLastCalledWith('ver010', [
-      { project_id: 'alpha', difficulty: 'easy', song_id: 42, slot: 2, mv_id: 14 },
+      { project_id: 'alpha', difficulty: 'easy', song_id: 134, slot: 4, mv_id: 14, music_style: 0, guest_available: true },
     ]))
   })
 
@@ -165,6 +179,8 @@ describe('Pm3VersionDialog', () => {
           song_id: 42,
           slot: 2,
           mv_id: 14,
+          music_style: 0,
+          guest_available: true,
           difficulties: ['easy'],
         },
       },
@@ -185,12 +201,12 @@ describe('Pm3VersionDialog', () => {
     )
 
     await waitFor(() => expect(previewMock).toHaveBeenLastCalledWith('ver011', [
-      { project_id: 'alpha', difficulty: 'easy', song_id: 42, slot: 2, mv_id: 14 },
-      { project_id: 'beta', difficulty: 'hard', song_id: 211, slot: 3, mv_id: 18 },
+      { project_id: 'alpha', difficulty: 'easy', song_id: 134, slot: 4, mv_id: 14, music_style: 0, guest_available: true },
+      { project_id: 'beta', difficulty: 'hard', song_id: 150, slot: 0, mv_id: 18, music_style: 1, guest_available: true },
     ]))
     expect(screen.getByText('HISTORY')).toBeTruthy()
     expect((screen.getAllByRole('checkbox', { name: '选择 Alpha' }).at(-1) as HTMLInputElement).disabled).toBe(true)
     expect((screen.getAllByRole('checkbox', { name: 'Alpha 初级' }).at(-1) as HTMLInputElement).disabled).toBe(true)
-    expect((screen.getAllByRole('spinbutton', { name: 'Alpha 曲目序号' }).at(-1) as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getAllByRole('combobox', { name: 'Alpha 曲目序号' }).at(-1) as HTMLSelectElement).disabled).toBe(true)
   })
 })

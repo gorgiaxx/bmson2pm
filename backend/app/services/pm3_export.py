@@ -17,6 +17,11 @@ from uuid import uuid4
 from ..adapters.pm3 import Pm3Adapter, Pm3BuildResult, Pm3FormatError
 from ..adapters.pm3_crypto import decrypt_chart, decrypt_song_list, encrypt_song_list
 from ..adapters.pm3_parser import DIFFICULTY_BY_CLASS, parse_chart_text, parse_song_list
+from ..adapters.pm3_reservations import (
+    PM3_RESERVED_SONG_IDS,
+    reserved_slot,
+    reserved_ui,
+)
 from ..models import DifficultyId, SongProject
 from ..storage import ProjectAssetError, ProjectNotFoundError, ProjectStore
 from .pm3_resources import (
@@ -102,11 +107,14 @@ class Pm3ExportService:
         song_id: int | None = None,
         include_song_list: bool = False,
         include_resources: bool = False,
+        music_style: int = 0,
+        guest_available: bool = True,
         mv_id: int = 0,
         resource_profile: str = "extracted-media-overlay",
     ) -> dict[str, Any]:
         self._validate_mv_id(mv_id)
         self._validate_resource_profile(resource_profile)
+        song_id, slot = self._reserved_assignment(song_id, difficulty, slot)
         built = self.adapter.build_with_report(
             project, difficulty, slot=slot, song_id=song_id,
         )
@@ -133,7 +141,7 @@ class Pm3ExportService:
         song_list_preview = None
         if include_song_list:
             song_list, song_list_plaintext, song_list_encoding, song_warnings = self._build_song_list(
-                project, difficulty, built
+                project, difficulty, built, guest_available, music_style
             )
             files.append(self._file_info("rewrite/script_download/SongList.enc", song_list))
             song_list_preview = {
@@ -173,6 +181,8 @@ class Pm3ExportService:
             ),
             "resources": self._resources(project),
             "include_resources": include_resources,
+            "music_style": music_style,
+            "guest_available": guest_available,
             "mv_id": mv_id,
             "resource_profile": resource_profile,
             "resource_package": resource_package,
@@ -197,6 +207,8 @@ class Pm3ExportService:
         song_id: int | None = None,
         include_song_list: bool = False,
         include_resources: bool = False,
+        music_style: int = 0,
+        guest_available: bool = True,
         mv_id: int = 0,
         resource_profile: str = "extracted-media-overlay",
         fail_after_files: int | None = None,
@@ -204,6 +216,7 @@ class Pm3ExportService:
         with self._lock:
             self._validate_mv_id(mv_id)
             self._validate_resource_profile(resource_profile)
+            song_id, slot = self._reserved_assignment(song_id, difficulty, slot)
             target = self._target(target_id)
             built = self.adapter.build_with_report(
                 project, difficulty, slot=slot, song_id=song_id,
@@ -225,7 +238,7 @@ class Pm3ExportService:
                 warnings.extend(resource_package["warnings"])
             if include_song_list:
                 song_list, _, _, song_warnings = self._build_song_list(
-                    project, difficulty, built
+                    project, difficulty, built, guest_available, music_style
                 )
                 artifacts["rewrite/script_download/SongList.enc"] = song_list
                 warnings.extend(song_warnings)
@@ -247,7 +260,7 @@ class Pm3ExportService:
                 report = self._report(
                     export_id, project, difficulty, target, built, artifacts,
                     warnings, include_song_list, include_resources, mv_id,
-                    resource_profile, resource_package,
+                    resource_profile, resource_package, guest_available, music_style,
                 )
                 if target["kind"] == "deployment":
                     deployment = self._deploy(
@@ -262,6 +275,9 @@ class Pm3ExportService:
                 archive = self._archive(export_id, final)
                 report["archive"] = str(archive)
                 self._write_report(final, report)
+                self._save_project_assignment(
+                    project, built.song_id, built.slot, guest_available, music_style
+                )
                 return report
             except Exception:
                 shutil.rmtree(temporary, ignore_errors=True)
@@ -306,6 +322,8 @@ class Pm3ExportService:
                 "song_id": self._project_song_id(project),
                 "slot": self._project_slot(project),
                 "mv_id": self._project_mv_id(project),
+                "music_style": self._project_music_style(project),
+                "guest_available": self._project_guest_available(project),
                 "difficulties": difficulties,
                 "audio_ready": bool(background["available"] and preview["available"]),
                 "audio": {"background": background, "preview": preview},
@@ -390,6 +408,8 @@ class Pm3ExportService:
                 Pm3RomSong(
                     song_id=song["song_id"],
                     mv_id=song["mv_id"],
+                    title=song["project"].metadata.title,
+                    artist=song["project"].metadata.artist,
                     background=self._read_resource(
                         song["project"], self._audio_resource_ref(song["project"], "background")
                     ),
@@ -472,6 +492,22 @@ class Pm3ExportService:
                 archive = self._archive(export_id, final)
                 report["archive"] = str(archive)
                 self._write_report(final, report)
+                for song in prepared["resource_songs"]:
+                    chart_slots = {
+                        int(chart["slot"])
+                        for chart in song["charts"]
+                    }
+                    if len(chart_slots) != 1:
+                        raise Pm3ExportError(
+                            f"曲目 {song['song_id']} 的多难度 Key slot 不一致"
+                        )
+                    self._save_project_assignment(
+                        song["project"],
+                        song["song_id"],
+                        next(iter(chart_slots)),
+                        song["guest_available"],
+                        song["music_style"],
+                    )
                 return report
             except Exception:
                 shutil.rmtree(temporary, ignore_errors=True)
@@ -614,13 +650,13 @@ class Pm3ExportService:
             raise Pm3ExportError("PM3 多曲版本一次最多包含 250 张谱面")
         lineage = self._version_lineage(version_name)
 
-        charts: list[tuple[SongProject, DifficultyId, Pm3BuildResult]] = []
+        charts: list[tuple[SongProject, DifficultyId, Pm3BuildResult, bool, int]] = []
         chart_summaries: list[dict[str, Any]] = []
         resource_by_song: dict[int, dict[str, Any]] = {}
         filenames: set[str] = set()
         warnings: list[str] = []
         artifacts: dict[str, bytes] = {}
-        selected_settings: dict[tuple[str, str], dict[str, int]] = {}
+        selected_settings: dict[tuple[str, str], dict[str, Any]] = {}
 
         for raw in entries:
             project_id = str(raw.get("project_id", ""))
@@ -647,7 +683,32 @@ class Pm3ExportService:
                 raise Pm3ExportError("PM3 曲目序号必须在 0..999")
             if slot < 0 or slot > 9:
                 raise Pm3ExportError("PM3 Key slot 必须在 0..9")
+            expected_slot = reserved_slot(song_id, difficulty)
+            if expected_slot is None:
+                if song_id not in PM3_RESERVED_SONG_IDS:
+                    choices = "、".join(str(value) for value in PM3_RESERVED_SONG_IDS)
+                    raise Pm3ExportError(f"PM3 新曲只能使用预留曲目 ID：{choices}")
+                raise Pm3ExportError(
+                    f"预留曲目 ID {song_id} 不支持 {difficulty.value} 难度"
+                )
+            if slot != expected_slot:
+                raise Pm3ExportError(
+                    f"曲目 ID {song_id} 的 {difficulty.value} 难度必须使用 Key slot {expected_slot}"
+                )
             self._validate_mv_id(mv_id)
+            guest_available = raw.get(
+                "guest_available", self._project_guest_available(project)
+            )
+            if not isinstance(guest_available, bool):
+                raise Pm3ExportError(f"{project.metadata.title} 的游客开放设置无效")
+            try:
+                music_style = int(raw.get(
+                    "music_style", self._project_music_style(project)
+                ))
+            except (TypeError, ValueError) as exc:
+                raise Pm3ExportError(f"{project.metadata.title} 的音乐分类无效") from exc
+            if music_style < 0 or music_style > 2:
+                raise Pm3ExportError("PM3 音乐分类必须在 0..2")
             entry_key = (project.id, difficulty.value)
             if entry_key in selected_settings:
                 raise Pm3ExportError(
@@ -657,6 +718,8 @@ class Pm3ExportService:
                 "song_id": song_id,
                 "slot": slot,
                 "mv_id": mv_id,
+                "guest_available": guest_available,
+                "music_style": music_style,
             }
             built = self.adapter.build_with_report(
                 project, difficulty, slot=slot, song_id=song_id,
@@ -667,7 +730,7 @@ class Pm3ExportService:
                 raise Pm3ExportError(f"多曲版本包含重复谱面：{built.filename}")
             filenames.add(lowered)
             artifacts[relative] = built.container
-            charts.append((project, difficulty, built))
+            charts.append((project, difficulty, built, guest_available, music_style))
             warnings.extend(built.warnings)
 
             resource_song = resource_by_song.get(song_id)
@@ -685,6 +748,8 @@ class Pm3ExportService:
                     "title": project.metadata.title,
                     "artist": project.metadata.artist,
                     "mv_id": mv_id,
+                    "guest_available": guest_available,
+                    "music_style": music_style,
                     "audio_ready": bool(
                         package["audio"]["background"]["available"]
                         and package["audio"]["preview"]["available"]
@@ -703,9 +768,14 @@ class Pm3ExportService:
                     "charts": [],
                 }
                 resource_by_song[song_id] = resource_song
-            elif resource_song["project_id"] != project.id or resource_song["mv_id"] != mv_id:
+            elif (
+                resource_song["project_id"] != project.id
+                or resource_song["mv_id"] != mv_id
+                or resource_song["guest_available"] != guest_available
+                or resource_song["music_style"] != music_style
+            ):
                 raise Pm3ExportError(
-                    f"曲目序号 {song_id} 被不同项目或 MV 重复使用"
+                    f"曲目序号 {song_id} 被不同项目、MV、分类或游客开放设置重复使用"
                 )
             else:
                 for asset_id, path in built.key_sound_paths.items():
@@ -740,6 +810,8 @@ class Pm3ExportService:
                 "level": project.difficulties[difficulty].level,
                 "slot": built.slot,
                 "mv_id": mv_id,
+                "guest_available": guest_available,
+                "music_style": music_style,
                 "filename": built.filename,
                 "note_objects": built.stats["note_objects"],
                 "event_count": built.stats["event_count"],
@@ -881,6 +953,8 @@ class Pm3ExportService:
             "song_id": song.get("song_id"),
             "slot": next(iter(slots)) if len(slots) == 1 else 0,
             "mv_id": song.get("mv_id", 0),
+            "guest_available": song.get("guest_available", True),
+            "music_style": song.get("music_style", 0),
             "difficulties": list(dict.fromkeys(difficulties)),
         }
 
@@ -915,11 +989,15 @@ class Pm3ExportService:
             project_id = song.get("project_id")
             song_id = song.get("song_id")
             mv_id = song.get("mv_id")
+            guest_available = song.get("guest_available", True)
+            music_style = song.get("music_style", 0)
             charts = song.get("charts")
             if (
                 not isinstance(project_id, str)
                 or not isinstance(song_id, int)
                 or not isinstance(mv_id, int)
+                or not isinstance(guest_available, bool)
+                or not isinstance(music_style, int)
                 or not isinstance(charts, list)
             ):
                 raise Pm3ExportError("本地最新版本报告的歌曲字段不完整")
@@ -936,6 +1014,8 @@ class Pm3ExportService:
                     "song_id": song_id,
                     "slot": slot,
                     "mv_id": mv_id,
+                    "guest_available": guest_available,
+                    "music_style": music_style,
                     "title": str(song.get("title", project_id)),
                 }
         return {
@@ -952,7 +1032,7 @@ class Pm3ExportService:
     @staticmethod
     def _validate_cumulative_selection(
         lineage: dict[str, Any],
-        selected: dict[tuple[str, str], dict[str, int]],
+        selected: dict[tuple[str, str], dict[str, Any]],
     ) -> None:
         required = lineage["required_entries"]
         missing = [
@@ -970,11 +1050,19 @@ class Pm3ExportService:
             )
         for key, expected in required.items():
             actual = selected[key]
+            remapping_legacy_id = (
+                expected["song_id"] not in PM3_RESERVED_SONG_IDS
+                and actual["song_id"] in PM3_RESERVED_SONG_IDS
+            )
             for field, label in (
                 ("song_id", "曲目序号"),
                 ("slot", "Key slot"),
                 ("mv_id", "MV"),
+                ("guest_available", "游客开放设置"),
+                ("music_style", "音乐分类"),
             ):
+                if remapping_legacy_id and field in {"song_id", "slot"}:
+                    continue
                 if actual[field] != expected[field]:
                     raise Pm3ExportError(
                         f"已发布谱面 {expected['title']} ({expected['difficulty']}) "
@@ -983,6 +1071,9 @@ class Pm3ExportService:
 
     @staticmethod
     def _project_song_id(project: SongProject) -> int | None:
+        configured = project.game_specific_data.get("pm3_song_id")
+        if isinstance(configured, int) and 0 <= configured <= 999:
+            return configured
         for value, pattern in (
             (project.metadata.game_song_id, r"([0-9]{1,3})"),
             (project.metadata.source_name, r"p([0-9]{1,3})"),
@@ -994,10 +1085,47 @@ class Pm3ExportService:
                 return min(999, int(match.group(1)))
         return None
 
+    def _save_project_assignment(
+        self,
+        project: SongProject,
+        song_id: int,
+        slot: int,
+        guest_available: bool,
+        music_style: int,
+    ) -> None:
+        if self.project_store is None:
+            return
+        assigned = project.model_copy(deep=True)
+        assigned.metadata.game_song_id = f"p{song_id:03d}"
+        assigned.game_specific_data["pm3_song_id"] = song_id
+        assigned.game_specific_data["pm3_slot"] = slot
+        assigned.game_specific_data["pm3_guest_available"] = guest_available
+        assigned.game_specific_data["pm3_music_style"] = music_style
+        self.project_store.save(assigned)
+
     @staticmethod
     def _project_slot(project: SongProject) -> int:
         slot = project.game_specific_data.get("pm3_slot")
         return int(slot) if isinstance(slot, int) and 0 <= slot <= 9 else 0
+
+    @staticmethod
+    def _project_guest_available(project: SongProject) -> bool:
+        value = project.game_specific_data.get("pm3_guest_available")
+        return value if isinstance(value, bool) else True
+
+    @staticmethod
+    def _project_music_style(project: SongProject) -> int:
+        value = project.game_specific_data.get("pm3_music_style")
+        if isinstance(value, int) and 0 <= value <= 2:
+            return value
+        raw = project.game_specific_data.get("pm3_song_info_raw_fields")
+        if isinstance(raw, list) and len(raw) == 16:
+            try:
+                style = int(raw[11])
+            except (TypeError, ValueError):
+                return 0
+            return style if 0 <= style <= 2 else 0
+        return 0
 
     def _project_mv_id(self, project: SongProject) -> int:
         value = project.mv_configuration.get("pm3_mv_id")
@@ -1017,17 +1145,43 @@ class Pm3ExportService:
         if PM3_VERSION_DIRECTORY.fullmatch(version_name) is None:
             raise Pm3ExportError("PM3 版本目录必须使用 verNNN 格式")
 
+    @staticmethod
+    def _reserved_assignment(
+        song_id: int | None,
+        difficulty: DifficultyId,
+        slot: int | None,
+    ) -> tuple[int, int]:
+        if song_id is None:
+            raise Pm3ExportError("请选择 PM3 预留曲目 ID")
+        expected_slot = reserved_slot(song_id, difficulty)
+        if expected_slot is None:
+            if song_id not in PM3_RESERVED_SONG_IDS:
+                choices = "、".join(str(value) for value in PM3_RESERVED_SONG_IDS)
+                raise Pm3ExportError(f"PM3 新曲只能使用预留曲目 ID：{choices}")
+            raise Pm3ExportError(
+                f"预留曲目 ID {song_id} 不支持 {difficulty.value} 难度"
+            )
+        if slot is not None and slot != expected_slot:
+            raise Pm3ExportError(
+                f"曲目 ID {song_id} 的 {difficulty.value} 难度必须使用 Key slot {expected_slot}"
+            )
+        return song_id, expected_slot
+
     def _build_song_list(
         self,
         project: SongProject,
         difficulty: DifficultyId,
         built: Pm3BuildResult,
+        guest_available: bool = True,
+        music_style: int = 0,
     ) -> tuple[bytes, bytes, str, list[str]]:
-        return self._build_song_list_many([(project, difficulty, built)])
+        return self._build_song_list_many([
+            (project, difficulty, built, guest_available, music_style)
+        ])
 
     def _build_song_list_many(
         self,
-        charts: list[tuple[SongProject, DifficultyId, Pm3BuildResult]],
+        charts: list[tuple[SongProject, DifficultyId, Pm3BuildResult, bool, int]],
     ) -> tuple[bytes, bytes, str, list[str]]:
         if not charts:
             raise Pm3ExportError("SongList 至少需要一张谱面")
@@ -1041,13 +1195,15 @@ class Pm3ExportService:
         rows = source["rows"]
         warnings = list(source.get("warnings", []))
         filenames: list[str] = []
-        for project, difficulty, built in charts:
+        for project, difficulty, built, guest_available, music_style in charts:
             filename = Path(built.filename).stem
             filenames.append(filename)
             matching = next(
                 (row for row in rows if row.filename.lower() == filename.lower()), None
             )
-            fields = self._song_list_fields(project, difficulty, built, matching)
+            fields = self._song_list_fields(
+                project, difficulty, built, matching, guest_available, music_style
+            )
             output = StringIO()
             csv.writer(output, lineterminator="").writerow(fields)
             new_line = output.getvalue()
@@ -1092,6 +1248,8 @@ class Pm3ExportService:
         difficulty: DifficultyId,
         built: Pm3BuildResult,
         matching: Any,
+        guest_available: bool = True,
+        music_style: int = 0,
     ) -> list[str]:
         filename = Path(built.filename).stem
         source_fields = project.game_specific_data.get("pm3_song_info_raw_fields")
@@ -1120,10 +1278,21 @@ class Pm3ExportService:
             (event.tick for event in parse_chart_text(built.plaintext)[0].events),
             default=0,
         ))
+        # SelSong::UISelFrmInfo reads field 5 directly for the displayed note
+        # count. Leaving the two fields at zero makes otherwise valid custom
+        # charts appear empty in the selection UI.
+        fields[4] = str(int(built.stats["note_objects"]))
+        fields[5] = str(int(built.stats["playable_events"]))
         fields[6] = f"{built.song_id:03d}"
         fields[7] = project.metadata.title
         fields[8] = project.metadata.artist
         fields[9] = str(built.song_id)
+        ui = reserved_ui(built.song_id)
+        if ui is None:
+            raise Pm3ExportError(f"曲目 {built.song_id} 没有 PM3 UI 预留帧")
+        fields[10] = str(ui["singer_id"])
+        fields[11] = str(music_style)
+        fields[12] = "0" if guest_available else "1"
         fields[13] = str(class_id)
         fields[14] = str(project.difficulties[difficulty].level)
         fields[15] = filename
@@ -1171,6 +1340,8 @@ class Pm3ExportService:
         mv_id: int,
         resource_profile: str,
         resource_package: dict[str, Any],
+        guest_available: bool,
+        music_style: int,
     ) -> dict[str, Any]:
         created = datetime.now(timezone.utc).isoformat()
         return {
@@ -1192,6 +1363,8 @@ class Pm3ExportService:
             "header": f"0x{built.header:08x}",
             "include_song_list": include_song_list,
             "include_resources": include_resources,
+            "guest_available": guest_available,
+            "music_style": music_style,
             "mv_id": mv_id,
             "resource_profile": resource_profile,
             "resource_package": resource_package,
@@ -1339,6 +1512,8 @@ class Pm3ExportService:
                 artifacts = self.rom_builder.build(
                     song_id=song_id,
                     mv_id=mv_id,
+                    title=project.metadata.title,
+                    artist=project.metadata.artist,
                     background=background,
                     preview=preview,
                     key_sounds=self._prepare_key_sounds(

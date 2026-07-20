@@ -3,9 +3,8 @@ import {
   CirclePlay,
   RefreshCw,
   Radio,
-  Zap,
 } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   createPm3MvPlayer,
   type RufflePlayerApi,
@@ -20,10 +19,6 @@ interface Pm3MvPreviewProps {
 
 const MV_STATES = ['LOW', 'MIDDLE', 'HIGH', 'FULL'] as const
 const DEFAULT_MV_STATE = 3
-
-function controllerUrl(projectId: string): string {
-  return `/api/projects/${encodeURIComponent(projectId)}/pm3/mv-preview/mvctrl/mvctrl.swf`
-}
 
 function mvUrl(projectId: string, mvId: number, state: number, previewKey: number): string {
   return `/api/projects/${encodeURIComponent(projectId)}/pm3/mv-preview/mv/mv${mvId}.swf?state=${MV_STATES[state].toLowerCase()}&preview=${previewKey}`
@@ -76,12 +71,75 @@ export function Pm3MvPreview({ projectId, mvId, available }: Pm3MvPreviewProps) 
   const apiRef = useRef<RufflePlayerApi | null>(null)
   const reloadRef = useRef(0)
   const stateLoadRef = useRef(0)
+  const directLoadRef = useRef(0)
+  const playingRef = useRef(true)
   const [reloadRevision, setReloadRevision] = useState(0)
-  const [status, setStatus] = useState<'loading' | 'controller' | 'direct' | 'error'>('loading')
+  const [status, setStatus] = useState<'loading' | 'direct' | 'error'>('loading')
   const [error, setError] = useState('')
   const [playing, setPlaying] = useState(true)
   const [state, setState] = useState(DEFAULT_MV_STATE)
-  const [cont, setCont] = useState(false)
+
+  const mountDirectPlayer = useCallback(async (
+    nextState: number,
+    revision: number,
+    replayColdLoad = false,
+  ): Promise<boolean> => {
+    const host = hostRef.current
+    if (!host || revision !== reloadRef.current) return false
+
+    // Ruffle does not reliably replace one PM3 SWF with another in the same
+    // player. A fresh instance is required for both MV and state changes.
+    const directRevision = ++directLoadRef.current
+    const element = await createPm3MvPlayer()
+    if (revision !== reloadRef.current || directRevision !== directLoadRef.current) return false
+
+    element.style.width = '100%'
+    element.style.height = '100%'
+    const player = element.ruffle()
+    apiRef.current?.suspend()
+    host.replaceChildren(element)
+    elementRef.current = element
+    apiRef.current = player
+
+    try {
+      await loadPlayer(element, player, loadOptions(
+        mvUrl(projectId, mvId, nextState, ++stateLoadRef.current),
+      ))
+      if (revision !== reloadRef.current || directRevision !== directLoadRef.current) {
+        player.suspend()
+        return false
+      }
+
+      if (replayColdLoad) {
+        // The first SWF loaded by a cold WASM runtime can report loadeddata
+        // before its initial frame is painted. A short replay makes it visible.
+        await new Promise((resolve) => window.setTimeout(resolve, 150))
+        if (revision !== reloadRef.current || directRevision !== directLoadRef.current) {
+          player.suspend()
+          return false
+        }
+        await loadPlayer(element, player, loadOptions(
+          mvUrl(projectId, mvId, nextState, ++stateLoadRef.current),
+        ))
+      }
+
+      if (revision !== reloadRef.current || directRevision !== directLoadRef.current) {
+        player.suspend()
+        return false
+      }
+      if (!playingRef.current) player.suspend()
+      return true
+    } catch (reason) {
+      if (revision !== reloadRef.current || directRevision !== directLoadRef.current) return false
+      player.suspend()
+      if (elementRef.current === element) {
+        elementRef.current = null
+        apiRef.current = null
+        element.remove()
+      }
+      throw reason
+    }
+  }, [mvId, projectId])
 
   useEffect(() => {
     const host = hostRef.current
@@ -91,58 +149,14 @@ export function Pm3MvPreview({ projectId, mvId, available }: Pm3MvPreviewProps) 
     setStatus('loading')
     setError('')
     setPlaying(true)
+    playingRef.current = true
     setState(DEFAULT_MV_STATE)
-    setCont(false)
     host.replaceChildren()
 
-    void createPm3MvPlayer()
-      .then(async (element) => {
-        if (cancelled || revision !== reloadRef.current) return
-        element.style.width = '100%'
-        element.style.height = '100%'
-        elementRef.current = element
-        const player = element.ruffle()
-        apiRef.current = player
-        host.appendChild(element)
-
-        await loadPlayer(element, player, loadOptions(controllerUrl(projectId)))
-        if (cancelled || revision !== reloadRef.current) return
-
-        // Scaleform calls global AS2 functions directly. Ruffle can only drive them
-        // when the SWF exposes an ExternalInterface callback, so retain a visual
-        // fallback that opens the selected template without the controller.
-        if (typeof element.MVLoad === 'function') {
-          player.callExternalInterface('MVLoad', mvId)
-          setStatus('controller')
-        } else {
-          // Reusing a player immediately after its first cold Ruffle load can
-          // leave the replacement SWF on a black frame. Mount a fresh player
-          // after probing the controller so the direct preview starts cleanly.
-          player.suspend()
-          element.remove()
-          const directElement = await createPm3MvPlayer()
-          if (cancelled || revision !== reloadRef.current) return
-          directElement.style.width = '100%'
-          directElement.style.height = '100%'
-          const directPlayer = directElement.ruffle()
-          elementRef.current = directElement
-          apiRef.current = directPlayer
-          host.appendChild(directElement)
-
-          await loadPlayer(directElement, directPlayer, loadOptions(
-            mvUrl(projectId, mvId, DEFAULT_MV_STATE, ++stateLoadRef.current),
-          ))
-          if (cancelled || revision !== reloadRef.current) return
-          // The first SWF loaded by a cold WASM runtime can report loadeddata
-          // before its initial frame is painted. A short replay makes it visible.
-          await new Promise((resolve) => window.setTimeout(resolve, 150))
-          if (cancelled || revision !== reloadRef.current) return
-          await loadPlayer(directElement, directPlayer, loadOptions(
-            mvUrl(projectId, mvId, DEFAULT_MV_STATE, ++stateLoadRef.current),
-          ))
-          if (cancelled || revision !== reloadRef.current) return
-          setStatus('direct')
-        }
+    void mountDirectPlayer(DEFAULT_MV_STATE, revision, true)
+      .then((mounted) => {
+        if (!mounted || cancelled || revision !== reloadRef.current) return
+        setStatus('direct')
       })
       .catch((reason: unknown) => {
         if (cancelled || revision !== reloadRef.current) return
@@ -153,33 +167,23 @@ export function Pm3MvPreview({ projectId, mvId, available }: Pm3MvPreviewProps) 
     return () => {
       cancelled = true
       reloadRef.current += 1
+      directLoadRef.current += 1
       apiRef.current?.suspend()
       apiRef.current = null
       elementRef.current = null
       host.replaceChildren()
     }
-  }, [available, mvId, projectId, reloadRevision])
+  }, [available, mountDirectPlayer, mvId, projectId, reloadRevision])
 
   const selectState = (next: number) => {
-    const player = apiRef.current
-    const element = elementRef.current
-    if (!player || !element || (status !== 'controller' && status !== 'direct')) return
-    if (status === 'controller') {
-      player.callExternalInterface('MVState', next)
-    } else {
-      void loadPlayer(
-        element,
-        player,
-        loadOptions(mvUrl(projectId, mvId, next, ++stateLoadRef.current)),
-      )
-        .then(() => {
-          if (!playing) player.suspend()
-        })
-        .catch((reason: unknown) => {
-          setError(reason instanceof Error ? reason.message : 'PM3 MV 状态加载失败')
-          setStatus('error')
-        })
-    }
+    if (!apiRef.current || !elementRef.current || status !== 'direct') return
+    const revision = reloadRef.current
+    void mountDirectPlayer(next, revision)
+      .catch((reason: unknown) => {
+        if (revision !== reloadRef.current) return
+        setError(reason instanceof Error ? reason.message : 'PM3 MV 状态加载失败')
+        setStatus('error')
+      })
     setState(next)
   }
 
@@ -188,14 +192,8 @@ export function Pm3MvPreview({ projectId, mvId, available }: Pm3MvPreviewProps) 
     if (!player || status === 'loading' || status === 'error') return
     if (playing) player.suspend()
     else player.resume()
-    setPlaying((value) => !value)
-  }
-
-  const toggleCont = () => {
-    if (status !== 'controller') return
-    const next = !cont
-    apiRef.current?.callExternalInterface('MVCont', next)
-    setCont(next)
+    playingRef.current = !playing
+    setPlaying(!playing)
   }
 
   return (
@@ -203,9 +201,7 @@ export function Pm3MvPreview({ projectId, mvId, available }: Pm3MvPreviewProps) 
       <header>
         <div>
           <span><Radio size={12} />MV {mvId}</span>
-          <strong>{status === 'controller'
-            ? 'CONTROL'
-            : status === 'direct'
+          <strong>{status === 'direct'
               ? 'VISUAL'
               : status === 'error'
                 ? 'ERROR'
@@ -249,31 +245,12 @@ export function Pm3MvPreview({ projectId, mvId, available }: Pm3MvPreviewProps) 
               className={state === index ? 'active' : ''}
               aria-pressed={state === index}
               onClick={() => selectState(index)}
-              disabled={status !== 'controller' && status !== 'direct'}
+              disabled={status !== 'direct'}
             >
               {label}
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          className={`icon-button ${cont ? 'active' : ''}`}
-          aria-pressed={cont}
-          onClick={toggleCont}
-          disabled={status !== 'controller'}
-          title="切换连续状态"
-        >
-          <Radio size={14} />
-        </button>
-        <button
-          type="button"
-          className="icon-button"
-          onClick={() => apiRef.current?.callExternalInterface('MVHeavy')}
-          disabled={status !== 'controller'}
-          title="触发 Heavy"
-        >
-          <Zap size={14} />
-        </button>
       </footer>
     </section>
   )

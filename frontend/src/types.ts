@@ -407,6 +407,8 @@ export interface Pm3ExportPreview {
   target_version: string
   resources: Array<Record<string, unknown>>
   include_resources: boolean
+  music_style: number
+  guest_available: boolean
   mv_id: number
   resource_profile: Pm3ResourceProfile
   resource_package: Pm3ResourcePackage
@@ -431,6 +433,8 @@ export interface Pm3ExportReport {
   header: string
   include_song_list: boolean
   include_resources: boolean
+  music_style: number
+  guest_available: boolean
   mv_id: number
   resource_profile: Pm3ResourceProfile
   resource_package: Pm3ResourcePackage
@@ -458,6 +462,8 @@ export interface Pm3VersionCandidate {
   song_id: number | null
   slot: number
   mv_id: number
+  music_style: number
+  guest_available: boolean
   difficulties: Pm3VersionDifficulty[]
   audio_ready: boolean
   audio: {
@@ -469,6 +475,8 @@ export interface Pm3VersionCandidate {
     song_id: number
     slot: number
     mv_id: number
+    music_style: number
+    guest_available: boolean
     difficulties: DifficultyId[]
   } | null
   next_version_name?: string
@@ -481,6 +489,8 @@ export interface Pm3VersionEntry {
   song_id: number
   slot: number
   mv_id: number
+  music_style: number
+  guest_available: boolean
 }
 
 export interface Pm3VersionSong {
@@ -489,12 +499,16 @@ export interface Pm3VersionSong {
   title: string
   artist: string
   mv_id: number
+  music_style: number
+  guest_available: boolean
   audio_ready: boolean
   charts: Array<{
     difficulty: DifficultyId
     difficulty_label: string
     level: number
     slot: number
+    music_style: number
+    guest_available: boolean
     filename: string
     note_objects: number
     event_count: number

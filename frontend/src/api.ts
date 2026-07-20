@@ -239,6 +239,8 @@ export const api = {
     slot: number,
     includeSongList: boolean,
     includeResources: boolean,
+    musicStyle: number,
+    guestAvailable: boolean,
     mvId: number,
     resourceProfile: Pm3ResourceProfile,
   ) => {
@@ -248,6 +250,8 @@ export const api = {
       slot: String(slot),
       include_song_list: String(includeSongList),
       include_resources: String(includeResources),
+      music_style: String(musicStyle),
+      guest_available: String(guestAvailable),
       mv_id: String(mvId),
       resource_profile: resourceProfile,
     })
@@ -262,6 +266,8 @@ export const api = {
     slot: number,
     includeSongList: boolean,
     includeResources: boolean,
+    musicStyle: number,
+    guestAvailable: boolean,
     mvId: number,
     resourceProfile: Pm3ResourceProfile,
   ) => jsonRequest<Pm3ExportReport>(`/api/projects/${projectId}/export/pm3`, {
@@ -274,6 +280,8 @@ export const api = {
       slot,
       include_song_list: includeSongList,
       include_resources: includeResources,
+      music_style: musicStyle,
+      guest_available: guestAvailable,
       mv_id: mvId,
       resource_profile: resourceProfile,
     }),

@@ -607,6 +607,17 @@ class Pm3Adapter(ChartFormatAdapter):
             warnings.append("项目没有 PM3 WAV 表，已加入 WAV 0 占位路径")
         if max(wavs, default=0) > 1023:
             raise Pm3FormatError("PM3 WAV 索引必须在 0..1023")
+        for index, raw_path in wavs.items():
+            try:
+                encoded_path = raw_path.encode("ascii")
+            except UnicodeEncodeError as exc:
+                raise Pm3FormatError(
+                    f"PM3 WAV {index} 路径必须是 ASCII：{raw_path}"
+                ) from exc
+            if len(encoded_path) > 31:
+                raise Pm3FormatError(
+                    f"PM3 WAV {index} 路径超过 31 字节，会导致 client 内存越界：{raw_path}"
+                )
         return dict(sorted(wavs.items())), by_asset
 
     def _build_events(
@@ -761,7 +772,10 @@ class Pm3Adapter(ChartFormatAdapter):
 
     @staticmethod
     def _custom_key_sound_path(song_id: int, asset_id: str) -> str:
-        digest = hashlib.sha256(asset_id.encode("utf-8")).hexdigest()[:16]
+        # The client stores each WAV path in a 32-byte char array using
+        # strncpy(..., 0x20). A 31-byte maximum is mandatory so the copied
+        # value retains its trailing NUL before StgData::LoadSound uses it.
+        digest = hashlib.sha256(asset_id.encode("utf-8")).hexdigest()[:12]
         return f"./note/b2p_{song_id:03d}_{digest}.wav"
 
     @staticmethod

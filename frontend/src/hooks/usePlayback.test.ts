@@ -320,6 +320,73 @@ describe('live lane mute', () => {
   })
 })
 
+describe('music bus volume', () => {
+  it('adjusts BGM independently and restores the selected level after unmuting', async () => {
+    const project = createDemoProject('music-volume-project')
+    project.metadata.audio_duration = 30
+    project.difficulties.hard.notes = []
+    const destination = {} as AudioDestinationNode
+    const gains: Array<{
+      gain: {
+        value: number
+        cancelScheduledValues: ReturnType<typeof vi.fn>
+        setTargetAtTime: ReturnType<typeof vi.fn>
+      }
+      output: AudioNode | null
+    }> = []
+    class FakeAudioContext {
+      state: AudioContextState = 'running'
+      currentTime = 0
+      sampleRate = 48_000
+      destination = destination
+      createBuffer = vi.fn(() => ({ duration: 0, length: 1, numberOfChannels: 1 } as AudioBuffer))
+      createBufferSource = vi.fn(() => ({
+        buffer: null,
+        playbackRate: { value: 1 },
+        onended: null,
+        connect: vi.fn((output: AudioNode) => output),
+        start: vi.fn(),
+        stop: vi.fn(),
+      } as unknown as AudioBufferSourceNode))
+      createGain = vi.fn(() => {
+        const node = {
+          gain: {
+            value: 1,
+            cancelScheduledValues: vi.fn(),
+            setTargetAtTime: vi.fn(),
+          },
+          output: null as AudioNode | null,
+          connect: vi.fn((output: AudioNode) => {
+            node.output = output
+            return output
+          }),
+          disconnect: vi.fn(),
+        }
+        gains.push(node)
+        return node as unknown as GainNode
+      })
+      close = vi.fn(async () => { this.state = 'closed' })
+    }
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    const manual = { duration: 30 } as AudioBuffer
+
+    const { result, unmount } = renderHook(() => usePlayback(project, 'hard', manual))
+    await act(async () => { await result.current.play() })
+    const musicGain = gains.find((gain) => gain.output === destination)
+    expect(musicGain).toBeDefined()
+
+    act(() => result.current.setMusicVolume(0.35))
+    expect(result.current.musicVolume).toBe(0.35)
+    expect(musicGain?.gain.setTargetAtTime).toHaveBeenLastCalledWith(0.35, 0, 0.012)
+
+    act(() => result.current.setMusicMuted(true))
+    expect(musicGain?.gain.setTargetAtTime).toHaveBeenLastCalledWith(0, 0, 0.012)
+    act(() => result.current.setMusicMuted(false))
+    expect(musicGain?.gain.setTargetAtTime).toHaveBeenLastCalledWith(0.35, 0, 0.012)
+    unmount()
+  })
+})
+
 describe('long-note roll playback', () => {
   it('previews generic long notes 1.5 times faster than a 1/16-note baseline', () => {
     const project = createDemoProject('roll-project')

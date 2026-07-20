@@ -1,7 +1,7 @@
 .PHONY: install dev-api dev-web test build
 
 install:
-	python3 -m venv backend/.venv
+	python3 -m venv --clear backend/.venv
 	backend/.venv/bin/pip install --index-url https://pypi.org/simple -e 'backend[dev]'
 	cd frontend && npm install --registry=https://registry.npmjs.org
 

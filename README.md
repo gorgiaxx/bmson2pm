@@ -12,6 +12,8 @@ make dev-web   # http://127.0.0.1:5173
 
 PM3 音频生成需要 `ffmpeg`；离线 ROM 构建还需要 `mksquashfs` 与 `unsquashfs`。macOS
 可通过 `brew install ffmpeg squashfs` 安装，其他系统安装对应的 `squashfs-tools` 包。
+自定义歌名和作者会自动写入 `ui.rom`；如需渲染中文，可用
+`BMSON2PM_PM3_UI_FONT` 指向支持中文的 TTF/TTC/OTF 字体。
 
 前端通过 Vite 将 `/api` 代理到 FastAPI。首次打开会加载内置示例谱面；左上角“导入”菜单会明确区分 BMSON、NoteList JSON 与传统 BMS，即使前两者都使用 `.json` 扩展名也不会混用解析器。右上角导出菜单可选择目标格式。
 
@@ -49,6 +51,8 @@ PM3 音频生成需要 `ffmpeg`；离线 ROM 构建还需要 `mksquashfs` 与 `u
 - PM3 完整歌曲音频生成、PowerOn 格式 `update.lst`、SquashFS 音频分包、`sound.rom`
   符号链接和 `lua_script.rom` MV 映射离线重建；跨格式谱面会自动补齐 Track 16 BGM
   启动事件，实际使用的自定义 Key 音会转换为 44.1 kHz PCM WAV 并写入 `sound.rom`
+- 预留曲目 ID 会同步重建 `songB.swf`、`songS.swf` 与 `singer.swf`，使选歌界面的
+  歌名、作者和 SongList 映射保持一致
 - 自定义 PM3 MV 上传与静态兼容性校验：使用 ID 20..99，接受 656x488、SWF 8/9、
   AS2 且含 `low/middle/high/full` 状态帧的 SWF；离线版本会累计重建 `ui.rom` 和
   `ui_mv6.rom`，并回读校验 SWF 内容及控制器加载链接

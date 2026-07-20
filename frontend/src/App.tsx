@@ -380,9 +380,11 @@ export default function App() {
       <Transport
         playing={playback.playing} position={playback.position} duration={duration}
         speed={playback.speed} loop={playback.loop} musicMuted={playback.musicMuted}
+        musicVolume={playback.musicVolume}
         audioName={audioName} onPlay={() => void playback.play()} onPause={playback.pause}
         onStop={playback.stop} onSeek={playback.seek} onSpeed={playback.setSpeed}
         onLoop={playback.setLoop} onMute={playback.setMusicMuted}
+        onMusicVolume={playback.setMusicVolume}
         onAudioFile={(file) => {
           playback.stop()
           void loadAudio(file)

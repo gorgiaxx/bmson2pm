@@ -8,6 +8,7 @@ interface TransportProps {
   speed: number
   loop: boolean
   musicMuted: boolean
+  musicVolume: number
   audioName: string | null
   onPlay: () => void
   onPause: () => void
@@ -16,6 +17,7 @@ interface TransportProps {
   onSpeed: (speed: number) => void
   onLoop: (loop: boolean) => void
   onMute: (muted: boolean) => void
+  onMusicVolume: (volume: number) => void
   onAudioFile: (file: File) => void
 }
 
@@ -59,6 +61,19 @@ export function Transport(props: TransportProps) {
       <button type="button" className={`icon-button ${props.musicMuted ? 'active' : ''}`} onClick={() => props.onMute(!props.musicMuted)} title={props.musicMuted ? '取消音乐静音' : '音乐静音'}>
         {props.musicMuted ? <VolumeX size={17} /> : <Volume2 size={17} />}
       </button>
+      <label className="music-volume-control" title="BGM 音量">
+        <span>BGM</span>
+        <input
+          type="range"
+          min="0"
+          max="2"
+          step="0.05"
+          value={props.musicVolume}
+          onChange={(event) => props.onMusicVolume(Number(event.target.value))}
+          aria-label="BGM 音量"
+        />
+        <b>{Math.round(props.musicVolume * 100)}%</b>
+      </label>
     </footer>
   )
 }

@@ -20,6 +20,11 @@ import type {
   Pm3VersionPreview,
   Pm3VersionReport,
 } from '../types'
+import {
+  PM3_RESERVED_SONG_IDS,
+  pm3CompatibleReservedIds,
+  pm3ReservedSlot,
+} from '../pm3Reservations'
 
 interface Pm3VersionDialogProps {
   currentProjectId: string
@@ -28,12 +33,13 @@ interface Pm3VersionDialogProps {
   onComplete: (report: Pm3VersionReport) => void
 }
 
-interface VersionRow extends Omit<Pm3VersionEntry, 'difficulty'> {
+interface VersionRow extends Omit<Pm3VersionEntry, 'difficulty' | 'slot'> {
   difficulties: DifficultyId[]
   lockedDifficulties: DifficultyId[]
 }
 
 const MV_IDS = Array.from({ length: 20 }, (_, value) => value).filter((value) => value !== 17)
+const MUSIC_STYLES = ['流行', '古典／童谣', '原创／其他']
 
 function sizeLabel(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -47,15 +53,7 @@ function initialRows(
   currentDifficulty: DifficultyId,
 ): VersionRow[] {
   const used = new Set<number>()
-  let nextSongId = 211
   return candidates.map((candidate) => {
-    let songId = candidate.released?.song_id ?? candidate.song_id
-    if (songId === null || used.has(songId)) {
-      while (used.has(nextSongId) && nextSongId <= 999) nextSongId += 1
-      songId = Math.min(999, nextSongId)
-      nextSongId += 1
-    }
-    used.add(songId)
     const difficultyIds = candidate.difficulties.map((item) => item.id)
     const lockedDifficulties = (candidate.released?.difficulties ?? [])
       .filter((item) => difficultyIds.includes(item))
@@ -67,13 +65,28 @@ function initialRows(
       ...lockedDifficulties,
       ...currentDifficulties,
     ])]
+    const compatible = pm3CompatibleReservedIds(
+      selectedDifficulties.length ? selectedDifficulties : difficultyIds.slice(0, 1),
+    )
+    const preferred = [candidate.released?.song_id, candidate.song_id]
+      .find((value): value is number => (
+        typeof value === 'number'
+        && compatible.includes(value)
+        && (!selectedDifficulties.length || !used.has(value))
+      ))
+    const songId = preferred
+      ?? compatible.find((value) => !selectedDifficulties.length || !used.has(value))
+      ?? compatible[0]
+      ?? PM3_RESERVED_SONG_IDS[0]
+    if (selectedDifficulties.length) used.add(songId)
     return {
       project_id: candidate.project_id,
       difficulties: selectedDifficulties,
       lockedDifficulties,
-      song_id: candidate.released?.song_id ?? songId,
-      slot: candidate.released?.slot ?? candidate.slot,
+      song_id: songId,
       mv_id: candidate.released?.mv_id ?? candidate.mv_id,
+      music_style: candidate.released?.music_style ?? candidate.music_style,
+      guest_available: candidate.released?.guest_available ?? candidate.guest_available,
     }
   })
 }
@@ -99,8 +112,10 @@ export function Pm3VersionDialog({
       project_id: row.project_id,
       difficulty,
       song_id: row.song_id,
-      slot: row.slot,
+      slot: pm3ReservedSlot(row.song_id, difficulty) ?? 0,
       mv_id: row.mv_id,
+      music_style: row.music_style,
+      guest_available: row.guest_available,
     }))
   )), [rows])
   const selectedSongCount = useMemo(
@@ -155,16 +170,29 @@ export function Pm3VersionDialog({
     )))
   }
 
-  const toggleDifficulty = (projectId: string, difficulty: DifficultyId, selected: boolean) => {
+  const setDifficulties = (projectId: string, difficulties: DifficultyId[]) => {
     setRows((current) => current.map((row) => {
       if (row.project_id !== projectId) return row
-      const difficulties = selected
-        ? [...new Set([...row.difficulties, difficulty])]
-        : row.lockedDifficulties.includes(difficulty)
-          ? row.difficulties
-          : row.difficulties.filter((item) => item !== difficulty)
-      return { ...row, difficulties }
+      const used = new Set(current
+        .filter((item) => item.project_id !== projectId && item.difficulties.length)
+        .map((item) => item.song_id))
+      const compatible = pm3CompatibleReservedIds(difficulties)
+      const songId = compatible.includes(row.song_id) && !used.has(row.song_id)
+        ? row.song_id
+        : compatible.find((value) => !used.has(value)) ?? row.song_id
+      return { ...row, difficulties, song_id: songId }
     }))
+  }
+
+  const toggleDifficulty = (projectId: string, difficulty: DifficultyId, selected: boolean) => {
+    const row = rows.find((item) => item.project_id === projectId)
+    if (!row) return
+    const difficulties = selected
+      ? [...new Set([...row.difficulties, difficulty])]
+      : row.lockedDifficulties.includes(difficulty)
+        ? row.difficulties
+        : row.difficulties.filter((item) => item !== difficulty)
+    setDifficulties(projectId, difficulties)
   }
 
   const submit = async () => {
@@ -232,7 +260,7 @@ export function Pm3VersionDialog({
 
               <div className="pm3-version-list" role="table" aria-label="版本曲目">
                 <div className="pm3-version-list-head" role="row">
-                  <span>曲目</span><span>难度</span><span>ID</span><span>KEY</span><span>MV</span><span>资源</span>
+                  <span>曲目</span><span>难度</span><span>ID</span><span>KEY</span><span>MV</span><span>分类</span><span>游客</span><span>资源</span>
                 </div>
                 {visibleCandidates.map((candidate) => {
                   const row = rows.find((item) => item.project_id === candidate.project_id)
@@ -241,17 +269,29 @@ export function Pm3VersionDialog({
                   const mvIds = candidate.mv_id >= 20 && !MV_IDS.includes(candidate.mv_id)
                     ? [...MV_IDS, candidate.mv_id]
                     : MV_IDS
+                  const idDifficulties = enabled
+                    ? row.difficulties
+                    : candidate.difficulties.slice(0, 1).map((item) => item.id)
+                  const usedByOthers = new Set(rows
+                    .filter((item) => item.project_id !== candidate.project_id && item.difficulties.length)
+                    .map((item) => item.song_id))
+                  const compatibleIds = pm3CompatibleReservedIds(idDifficulties)
+                    .filter((value) => value === row.song_id || !usedByOthers.has(value))
+                  const slotSummary = row.difficulties.length
+                    ? row.difficulties.map((item) => `${item.slice(0, 2).toUpperCase()}:${pm3ReservedSlot(row.song_id, item)}`).join(' / ')
+                    : 'AUTO'
                   return (
                     <div className={`pm3-version-row ${enabled ? 'selected' : ''}`} role="row" key={candidate.project_id}>
                       <label className="pm3-version-song">
                         <input
                           type="checkbox"
                           checked={enabled}
-                          onChange={(event) => updateRow(candidate.project_id, {
-                            difficulties: event.target.checked
+                          onChange={(event) => setDifficulties(
+                            candidate.project_id,
+                            event.target.checked
                               ? candidate.difficulties.map((item) => item.id)
                               : row.lockedDifficulties,
-                          })}
+                          )}
                           disabled={busy || !candidate.difficulties.length || row.lockedDifficulties.length > 0}
                           aria-label={`选择 ${candidate.title}`}
                         />
@@ -276,22 +316,23 @@ export function Pm3VersionDialog({
                       </div>
                       <label className="pm3-version-field">
                         <span>ID</span>
-                        <input
-                          type="number" min="0" max="999" step="1" value={row.song_id}
+                        <select
+                          value={row.song_id}
                           onChange={(event) => updateRow(candidate.project_id, { song_id: Number(event.target.value) })}
                           disabled={busy || !enabled || row.lockedDifficulties.length > 0}
                           aria-label={`${candidate.title} 曲目序号`}
-                        />
+                        >
+                          {compatibleIds.map((value) => <option value={value} key={value}>{String(value).padStart(3, '0')}</option>)}
+                        </select>
                       </label>
                       <label className="pm3-version-field">
                         <span>KEY</span>
                         <select
-                          value={row.slot}
-                          onChange={(event) => updateRow(candidate.project_id, { slot: Number(event.target.value) })}
-                          disabled={busy || !enabled || row.lockedDifficulties.length > 0}
+                          value={slotSummary}
+                          disabled
                           aria-label={`${candidate.title} Key slot`}
                         >
-                          {Array.from({ length: 10 }, (_, value) => <option value={value} key={value}>{value}</option>)}
+                          <option value={slotSummary}>{slotSummary}</option>
                         </select>
                       </label>
                       <label className="pm3-version-field">
@@ -308,6 +349,33 @@ export function Pm3VersionDialog({
                             </option>
                           ))}
                         </select>
+                      </label>
+                      <label className="pm3-version-field">
+                        <span>分类</span>
+                        <select
+                          value={row.music_style}
+                          onChange={(event) => updateRow(candidate.project_id, {
+                            music_style: Number(event.target.value),
+                          })}
+                          disabled={busy || !enabled || row.lockedDifficulties.length > 0}
+                          aria-label={`${candidate.title} 音乐分类`}
+                        >
+                          {MUSIC_STYLES.map((label, value) => (
+                            <option value={value} key={label}>{label}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="pm3-version-field pm3-version-guest">
+                        <span>游客</span>
+                        <input
+                          type="checkbox"
+                          checked={row.guest_available}
+                          onChange={(event) => updateRow(candidate.project_id, {
+                            guest_available: event.target.checked,
+                          })}
+                          disabled={busy || !enabled || row.lockedDifficulties.length > 0}
+                          aria-label={`${candidate.title} 游客开放`}
+                        />
                       </label>
                       <span className={`pm3-version-ready ${candidate.audio_ready ? 'ready' : ''}`}>
                         <i />{row.lockedDifficulties.length ? 'HISTORY' : candidate.audio_ready ? 'AUDIO' : 'MISSING'}

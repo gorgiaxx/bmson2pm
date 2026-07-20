@@ -9,6 +9,7 @@ description = "BMSON2PM chart editor API"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.116,<1",
+  "pillow>=11.3,<13",
   "uvicorn[standard]>=0.35,<1",
   "python-multipart>=0.0.20,<1",
 ]
@@ -24,4 +25,3 @@ include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

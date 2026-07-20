@@ -270,6 +270,7 @@ export function usePlayback(
   const [speed, setSpeedState] = useState(1)
   const [loop, setLoop] = useState(false)
   const [musicMuted, setMusicMutedState] = useState(false)
+  const [musicVolume, setMusicVolumeState] = useState(1)
   const [keySoundStatus, setKeySoundStatus] = useState({ ready: 0, total: 0, failed: 0 })
   const [autoMusic, setAutoMusic] = useState<AutomaticMusic | null>(null)
   const [autoMusicLoading, setAutoMusicLoading] = useState<string | null>(null)
@@ -283,6 +284,7 @@ export function usePlayback(
   const speedRef = useRef(1)
   const playingRef = useRef(false)
   const musicMutedRef = useRef(false)
+  const musicVolumeRef = useRef(1)
   const scrubWasPlayingRef = useRef(false)
   const sourceRef = useRef<AudioBufferSourceNode | null>(null)
   const keySoundBuffersRef = useRef(new Map<string, AudioBuffer>())
@@ -354,7 +356,7 @@ export function usePlayback(
     if (!ctx) return null
     if (!musicBusRef.current) {
       const gain = ctx.createGain()
-      gain.gain.value = musicMutedRef.current ? 0 : 1
+      gain.gain.value = musicMutedRef.current ? 0 : musicVolumeRef.current
       gain.connect(ctx.destination)
       musicBusRef.current = gain
     }
@@ -728,7 +730,23 @@ export function usePlayback(
     const gain = musicBusRef.current
     if (!ctx || !gain) return
     gain.gain.cancelScheduledValues(ctx.currentTime)
-    gain.gain.setTargetAtTime(muted ? 0 : 1, ctx.currentTime, 0.012)
+    gain.gain.setTargetAtTime(
+      muted ? 0 : musicVolumeRef.current,
+      ctx.currentTime,
+      0.012,
+    )
+  }, [])
+
+  const setMusicVolume = useCallback((value: number) => {
+    const next = Math.max(0, Math.min(2, Number.isFinite(value) ? value : 1))
+    musicVolumeRef.current = next
+    setMusicVolumeState(next)
+    if (musicMutedRef.current) return
+    const ctx = contextRef.current
+    const gain = musicBusRef.current
+    if (!ctx || !gain) return
+    gain.gain.cancelScheduledValues(ctx.currentTime)
+    gain.gain.setTargetAtTime(next, ctx.currentTime, 0.012)
   }, [])
 
   const currentPosition = useCallback(() => {
@@ -931,11 +949,11 @@ export function usePlayback(
   }, [difficulty, project.difficulties])
 
   return {
-    playing, position, speed, loop, musicMuted, keySoundStatus, autoMusic, autoMusicLoading, duration,
+    playing, position, speed, loop, musicMuted, musicVolume, keySoundStatus, autoMusic, autoMusicLoading, duration,
     bgmEventCount: bmsBgmSchedule.length,
     musicStart: effectiveMusic?.startTime ?? 0,
     musicDuration: effectiveMusic?.buffer.duration ?? 0,
     play, pause, stop, seek, beginScrub, scrubTo, endScrub,
-    setSpeed, setLoop, setMusicMuted, triggerKeySound, triggerLane, triggerNote,
+    setSpeed, setLoop, setMusicMuted, setMusicVolume, triggerKeySound, triggerLane, triggerNote,
   }
 }

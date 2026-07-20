@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from ..adapters.pm3_reservations import reserved_ui
+from .pm3_ui import Pm3UiError, Pm3UiText, patch_pm3_ui_swf
 from .pm3_workspace import Pm3Workspace, Pm3WorkspaceError
 
 
@@ -36,6 +38,8 @@ class Pm3RomMv:
 class Pm3RomSong:
     song_id: int
     mv_id: int
+    title: str
+    artist: str
     background: bytes
     preview: bytes
     key_sounds: tuple[Pm3RomKeySound, ...] = ()
@@ -137,6 +141,7 @@ class Pm3RomBuilder:
         paths: dict[str, Path] = {}
         for key, relative, expect in (
             ("sound_rom", "ROMS/sound.rom", "file"),
+            ("ui_rom", "ROMS/ui.rom", "file"),
             ("lua_source", "media/lua_script", "directory"),
         ):
             try:
@@ -145,7 +150,6 @@ class Pm3RomBuilder:
                 missing.append(relative)
         if selected_mv_ids:
             for key, relative, expect in (
-                ("ui_rom", "ROMS/ui.rom", "file"),
                 ("ui_mv6_source", "media/ui_mv6", "directory"),
             ):
                 try:
@@ -181,9 +185,9 @@ class Pm3RomBuilder:
             missing.append("mksquashfs")
         if unsquashfs is None:
             missing.append("unsquashfs")
-        files = ["ROMS/lua_script.rom", "ROMS/sound.rom"]
+        files = ["ROMS/lua_script.rom", "ROMS/sound.rom", "ROMS/ui.rom"]
         if selected_mv_ids:
-            files.extend(("ROMS/ui.rom", "ROMS/ui_mv6.rom"))
+            files.append("ROMS/ui_mv6.rom")
         for bundle in bundles:
             files.extend((f"ROMS/SOUND_BG{bundle}.rom", f"ROMS/SOUND_PRE{bundle}.rom"))
         return {
@@ -205,6 +209,8 @@ class Pm3RomBuilder:
         *,
         song_id: int,
         mv_id: int,
+        title: str,
+        artist: str,
         background: bytes,
         preview: bytes,
         key_sounds: tuple[Pm3RomKeySound, ...] = (),
@@ -214,6 +220,8 @@ class Pm3RomBuilder:
             Pm3RomSong(
                 song_id=song_id,
                 mv_id=mv_id,
+                title=title,
+                artist=artist,
                 background=background,
                 preview=preview,
                 key_sounds=key_sounds,
@@ -259,11 +267,13 @@ class Pm3RomBuilder:
         unsquashfs = str(unsquashfs_path)
         lua_source = self.workspace.resolve("game", "media/lua_script", expect="directory")
         sound_rom = self.workspace.resolve("game", "ROMS/sound.rom", expect="file")
+        ui_rom = self.workspace.resolve("game", "ROMS/ui.rom", expect="file")
 
         with tempfile.TemporaryDirectory(prefix="bmson2pm-pm3-rom-") as directory:
             temporary = Path(directory)
             lua_root = temporary / "lua_script"
             sound_root = temporary / "sound"
+            ui_root = temporary / "ui"
             output = temporary / "output"
             output.mkdir()
 
@@ -332,16 +342,48 @@ class Pm3RomBuilder:
                     raise Pm3RomBuildError(f"无法写入自定义 Key 音：{relative}")
                 destination.write_bytes(payload)
 
-            ui_root: Path | None = None
+            self._run(
+                [unsquashfs, "-no-progress", "-d", str(ui_root), str(ui_rom)],
+                "展开 ui.rom",
+            )
+            title_large: list[Pm3UiText] = []
+            title_small: list[Pm3UiText] = []
+            singers: list[Pm3UiText] = []
+            for song in songs:
+                reservation = reserved_ui(song.song_id)
+                if reservation is None:
+                    raise Pm3RomBuildError(
+                        f"曲目 {song.song_id} 没有 PM3 UI 预留帧"
+                    )
+                title_large.append(Pm3UiText(
+                    reservation["title_image"], song.title, "songB",
+                ))
+                title_small.append(Pm3UiText(
+                    reservation["title_image"], song.title, "songS",
+                ))
+                singers.append(Pm3UiText(
+                    reservation["singer_image"], song.artist, "singer",
+                ))
+            ui_replacements = {
+                "song/songB.swf": title_large,
+                "song/songS.swf": title_small,
+                "singer/singer.swf": singers,
+            }
+            patched_ui_files: dict[str, bytes] = {}
+            try:
+                for relative, replacements in ui_replacements.items():
+                    path = ui_root.joinpath(*PurePosixPath(relative).parts)
+                    if not path.is_file():
+                        raise Pm3RomBuildError(f"ui.rom 缺少 {relative}")
+                    patched = patch_pm3_ui_swf(path.read_bytes(), replacements)
+                    path.write_bytes(patched)
+                    patched_ui_files[relative] = patched
+            except Pm3UiError as exc:
+                raise Pm3RomBuildError(str(exc)) from exc
+
             ui_mv6_root: Path | None = None
             if custom_mvs:
-                ui_root = temporary / "ui"
                 ui_mv6_root = temporary / "ui_mv6"
-                ui_rom = self.workspace.resolve("game", "ROMS/ui.rom", expect="file")
-                self._run(
-                    [unsquashfs, "-no-progress", "-d", str(ui_root), str(ui_rom)],
-                    "展开 ui.rom",
-                )
                 shutil.copytree(
                     self.workspace.resolve("game", "media/ui_mv6", expect="directory"),
                     ui_mv6_root,
@@ -358,17 +400,15 @@ class Pm3RomBuilder:
             builds = [
                 (lua_root, output / "lua_script.rom"),
                 (sound_root, output / "sound.rom"),
+                (ui_root, output / "ui.rom"),
             ]
             for bundle in bundles:
                 builds.extend((
                     (background_roots[bundle], output / f"SOUND_BG{bundle}.rom"),
                     (preview_roots[bundle], output / f"SOUND_PRE{bundle}.rom"),
                 ))
-            if ui_root is not None and ui_mv6_root is not None:
-                builds.extend((
-                    (ui_root, output / "ui.rom"),
-                    (ui_mv6_root, output / "ui_mv6.rom"),
-                ))
+            if ui_mv6_root is not None:
+                builds.append((ui_mv6_root, output / "ui_mv6.rom"))
             for source, destination in builds:
                 self._build_image(mksquashfs, source, destination)
                 self._verify_image(unsquashfs, destination)
@@ -384,6 +424,9 @@ class Pm3RomBuilder:
                     preview=song.preview,
                     key_sounds=song.key_sounds,
                 )
+            self._verify_ui_contents(
+                unsquashfs, output=output, expected=patched_ui_files,
+            )
             for mv_id, payload in custom_mvs.items():
                 self._verify_mv_contents(
                     unsquashfs,
@@ -534,6 +577,21 @@ class Pm3RomBuilder:
         expected_link = f"mv/{filename} -> ../../ui_mv6/./{filename}"
         if expected_link not in listing:
             raise Pm3RomBuildError(f"ui.rom 缺少链接：{expected_link}")
+
+    def _verify_ui_contents(
+        self,
+        tool: str,
+        *,
+        output: Path,
+        expected: dict[str, bytes],
+    ) -> None:
+        for relative, payload in expected.items():
+            actual = self._run_bytes(
+                [tool, "-cat", str(output / "ui.rom"), relative],
+                f"回读 PM3 UI {PurePosixPath(relative).name}",
+            )
+            if actual != payload:
+                raise Pm3RomBuildError(f"ui.rom 回读内容不一致：{relative}")
 
     def _run(self, command: list[str], action: str) -> None:
         self._run_bytes(command, action)

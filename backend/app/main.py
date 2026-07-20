@@ -22,6 +22,7 @@ from .adapters import (
     Pm3FormatError,
 )
 from .factory import new_project
+from .adapters.pm3_reservations import reservation_catalog
 from .models import (
     CreateProjectRequest,
     DifficultyId,
@@ -79,6 +80,8 @@ class Pm3ExportRequest(BaseModel):
     song_id: int | None = None
     include_song_list: bool = False
     include_resources: bool = False
+    music_style: int = Field(default=0, ge=0, le=2)
+    guest_available: bool = True
     mv_id: int = Field(default=0, ge=0, le=99)
     resource_profile: Literal["extracted-media-overlay", "squashfs-ota"] = "extracted-media-overlay"
 
@@ -86,9 +89,11 @@ class Pm3ExportRequest(BaseModel):
 class Pm3VersionEntryRequest(BaseModel):
     project_id: str
     difficulty: DifficultyId
-    song_id: int = Field(ge=0, le=999)
+    song_id: int = Field(ge=0, le=210)
     slot: int = Field(default=0, ge=0, le=9)
     mv_id: int = Field(default=0, ge=0, le=99)
+    music_style: int = Field(default=0, ge=0, le=2)
+    guest_available: bool = True
 
 
 class Pm3VersionRequest(BaseModel):
@@ -539,6 +544,10 @@ def create_app(
     def pm3_export_targets() -> list[dict[str, object]]:
         return app.state.pm3_export.target_descriptors()
 
+    @app.get("/api/pm3/song-id-reservations")
+    def pm3_song_id_reservations() -> list[dict[str, object]]:
+        return reservation_catalog()
+
     @app.get("/api/pm3/version-candidates")
     def pm3_version_candidates() -> list[dict[str, object]]:
         try:
@@ -694,9 +703,11 @@ def create_app(
         project_id: str,
         difficulty: DifficultyId = Query(DifficultyId.hard),
         slot: int | None = Query(None, ge=0, le=9),
-        song_id: int | None = Query(None, ge=0, le=999),
+        song_id: int | None = Query(None, ge=0, le=210),
         include_song_list: bool = Query(False),
         include_resources: bool = Query(False),
+        music_style: int = Query(0, ge=0, le=2),
+        guest_available: bool = Query(True),
         mv_id: int = Query(0, ge=0, le=99),
         resource_profile: Literal["extracted-media-overlay", "squashfs-ota"] = Query(
             "extracted-media-overlay"
@@ -707,6 +718,8 @@ def create_app(
                 get_project(project_id), difficulty, slot=slot, song_id=song_id,
                 include_song_list=include_song_list,
                 include_resources=include_resources,
+                music_style=music_style,
+                guest_available=guest_available,
                 mv_id=mv_id,
                 resource_profile=resource_profile,
             )
@@ -722,6 +735,8 @@ def create_app(
                 song_id=request.song_id,
                 include_song_list=request.include_song_list,
                 include_resources=request.include_resources,
+                music_style=request.music_style,
+                guest_available=request.guest_available,
                 mv_id=request.mv_id,
                 resource_profile=request.resource_profile,
             )

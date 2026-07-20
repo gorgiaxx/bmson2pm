@@ -27,6 +27,11 @@ import type {
   Pm3ResourceProfile,
   SongProject,
 } from '../types'
+import {
+  PM3_RESERVED_SONG_IDS,
+  pm3CompatibleReservedIds,
+  pm3ReservedSlot,
+} from '../pm3Reservations'
 import { Pm3MvPreview } from './Pm3MvPreview'
 
 interface Pm3ExportDialogProps {
@@ -38,6 +43,11 @@ interface Pm3ExportDialogProps {
 }
 
 const PM3_MV_IDS = Array.from({ length: 20 }, (_, value) => value).filter((value) => value !== 17)
+const PM3_MUSIC_STYLES = [
+  { value: 0, label: '流行' },
+  { value: 1, label: '古典／童谣' },
+  { value: 2, label: '原创／其他' },
+]
 
 function sizeLabel(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -45,10 +55,17 @@ function sizeLabel(bytes: number): string {
   return `${(bytes / 1024).toFixed(1)} KB`
 }
 
-function initialSongId(project: SongProject): string {
+function initialSongId(project: SongProject, difficulty: DifficultyId): number {
   const match = project.metadata.game_song_id?.match(/(\d{1,3})/)
     ?? project.metadata.source_name?.match(/p(\d{1,3})/i)
-  return match ? String(Math.min(999, Number(match[1]))) : '0'
+  const configured = project.game_specific_data.pm3_song_id
+  const candidate = typeof configured === 'number'
+    ? configured
+    : match ? Number(match[1]) : null
+  const compatible = pm3CompatibleReservedIds([difficulty])
+  return candidate !== null && compatible.includes(candidate)
+    ? candidate
+    : compatible[0] ?? PM3_RESERVED_SONG_IDS[0]
 }
 
 type PreviewTab = 'chart' | 'update_list' | 'song_list'
@@ -78,7 +95,6 @@ export function Pm3ExportDialog({
   onComplete,
   onProjectChange,
 }: Pm3ExportDialogProps) {
-  const sourceSlot = project.game_specific_data.pm3_slot
   const initialAudio = pm3AudioConfig(project)
   const initialMv = pm3MvConfig(project)
   const configuredMvId = typeof initialMv.id === 'number'
@@ -88,12 +104,25 @@ export function Pm3ExportDialog({
   const projectMvId = project.mv_configuration.pm3_mv_id
   const audioInputRef = useRef<HTMLInputElement>(null)
   const mvInputRef = useRef<HTMLInputElement>(null)
-  const [slot, setSlot] = useState(typeof sourceSlot === 'number' && sourceSlot >= 0 && sourceSlot <= 9 ? sourceSlot : 0)
-  const [songIdInput, setSongIdInput] = useState(() => initialSongId(project))
+  const compatibleSongIds = useMemo(
+    () => pm3CompatibleReservedIds([difficulty]),
+    [difficulty],
+  )
+  const [songId, setSongId] = useState(() => initialSongId(project, difficulty))
+  const slot = pm3ReservedSlot(songId, difficulty) ?? 0
   const [targets, setTargets] = useState<Pm3ExportTarget[]>([])
   const [targetId, setTargetId] = useState('staging')
   const [includeSongList, setIncludeSongList] = useState(false)
   const [includeResources, setIncludeResources] = useState(false)
+  const [musicStyle, setMusicStyle] = useState(() => {
+    const configured = project.game_specific_data.pm3_music_style
+    return typeof configured === 'number' && configured >= 0 && configured <= 2
+      ? configured
+      : 0
+  })
+  const [guestAvailable, setGuestAvailable] = useState(
+    project.game_specific_data.pm3_guest_available !== false,
+  )
   const [resourceProfile, setResourceProfile] = useState<Pm3ResourceProfile>('extracted-media-overlay')
   const [mvId, setMvId] = useState(
     typeof projectMvId === 'number'
@@ -117,11 +146,10 @@ export function Pm3ExportDialog({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [previewTab, setPreviewTab] = useState<PreviewTab>('chart')
-  const songId = /^\d{1,3}$/.test(songIdInput) && Number(songIdInput) <= 999
-    ? Number(songIdInput)
-    : null
   const currentPreview = preview?.song_id === songId
     && preview.include_resources === includeResources
+    && preview.music_style === musicStyle
+    && preview.guest_available === guestAvailable
     && preview.mv_id === mvId
     && preview.resource_profile === resourceProfile
     ? preview
@@ -130,6 +158,12 @@ export function Pm3ExportDialog({
     () => targets.find((target) => target.id === targetId),
     [targetId, targets],
   )
+
+  useEffect(() => {
+    if (!compatibleSongIds.includes(songId)) {
+      setSongId(compatibleSongIds[0] ?? PM3_RESERVED_SONG_IDS[0])
+    }
+  }, [compatibleSongIds, songId])
 
   useEffect(() => {
     let cancelled = false
@@ -143,17 +177,17 @@ export function Pm3ExportDialog({
     let cancelled = false
     setPreview(null)
     setError(null)
-    if (songId === null) return () => { cancelled = true }
     const timer = window.setTimeout(() => {
       void api.pm3ExportPreview(
-        project.id, difficulty, songId, slot, includeSongList, includeResources, mvId,
+        project.id, difficulty, songId, slot, includeSongList, includeResources,
+        musicStyle, guestAvailable, mvId,
         resourceProfile,
       )
         .then((value) => { if (!cancelled) setPreview(value) })
         .catch((reason) => { if (!cancelled) setError(reason instanceof Error ? reason.message : 'PM3 预检失败') })
     }, 120)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [audioRevision, difficulty, includeResources, includeSongList, mvId, mvRevision, project.id, resourceProfile, slot, songId])
+  }, [audioRevision, difficulty, guestAvailable, includeResources, includeSongList, musicStyle, mvId, mvRevision, project.id, resourceProfile, slot, songId])
 
   useEffect(() => {
     if (!includeSongList && previewTab === 'song_list') setPreviewTab('chart')
@@ -163,12 +197,23 @@ export function Pm3ExportDialog({
     setBusy(true)
     setError(null)
     try {
-      if (songId === null) return
       const completed = await api.exportPm3(
-        project.id, difficulty, targetId, songId, slot, includeSongList, includeResources, mvId,
+        project.id, difficulty, targetId, songId, slot, includeSongList, includeResources,
+        musicStyle, guestAvailable, mvId,
         resourceProfile,
       )
       setReport(completed)
+      onProjectChange({
+        ...project,
+        metadata: { ...project.metadata, game_song_id: `p${String(songId).padStart(3, '0')}` },
+        game_specific_data: {
+          ...project.game_specific_data,
+          pm3_song_id: songId,
+          pm3_slot: slot,
+          pm3_music_style: musicStyle,
+          pm3_guest_available: guestAvailable,
+        },
+      })
       onComplete(completed)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'PM3 导出失败')
@@ -247,7 +292,7 @@ export function Pm3ExportDialog({
           <div>
             <span className="dialog-format"><ShieldCheck size={14} />PM3 DEPLOY</span>
             <h2 id="pm3-export-title">{project.metadata.title}</h2>
-            <p>{project.difficulties[difficulty].display_name} · {currentPreview?.filename ?? `p${songId === null ? '---' : String(songId).padStart(3, '0')}_${difficulty}.enc`}</p>
+            <p>{project.difficulties[difficulty].display_name} · {currentPreview?.filename ?? `p${String(songId).padStart(3, '0')}_${difficulty}.enc`}</p>
           </div>
           <button type="button" className="icon-button" onClick={onClose} disabled={busy} title="关闭">
             <X size={17} />
@@ -275,21 +320,27 @@ export function Pm3ExportDialog({
                   </label>
                   <label>
                     <span><ListOrdered size={13} />曲目序号</span>
-                    <input
-                      type="number"
-                      min="0"
-                      max="999"
-                      step="1"
-                      value={songIdInput}
-                      onChange={(event) => setSongIdInput(event.target.value)}
-                      aria-invalid={songId === null}
-                      disabled={busy}
-                    />
+                    <select value={songId} onChange={(event) => setSongId(Number(event.target.value))} disabled={busy} aria-label="曲目序号">
+                      {compatibleSongIds.map((value) => <option value={value} key={value}>ID {String(value).padStart(3, '0')}</option>)}
+                    </select>
                   </label>
                   <label>
-                    <span title="由谱面加密 header 选择，与曲目序号无固定关系"><KeyRound size={13} />Key slot</span>
-                    <select value={slot} onChange={(event) => setSlot(Number(event.target.value))} disabled={busy}>
-                      {Array.from({ length: 10 }, (_, value) => <option key={value} value={value}>Slot {value}</option>)}
+                    <span title="由预留曲目 ID 与当前难度的原厂 cut table 自动确定"><KeyRound size={13} />Key slot</span>
+                    <select value={slot} disabled aria-label="Key slot">
+                      <option value={slot}>Slot {slot} · AUTO</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span><ListMusic size={13} />音乐分类</span>
+                    <select
+                      value={musicStyle}
+                      onChange={(event) => setMusicStyle(Number(event.target.value))}
+                      disabled={busy}
+                      aria-label="音乐分类"
+                    >
+                      {PM3_MUSIC_STYLES.map((style) => (
+                        <option value={style.value} key={style.value}>{style.label}</option>
+                      ))}
                     </select>
                   </label>
                 </div>
@@ -303,6 +354,15 @@ export function Pm3ExportDialog({
                     <span>{resourceProfile === 'squashfs-ota'
                       ? '包含音乐、试听与 SquashFS ROM'
                       : '包含音乐、试听与 MV 清单'}</span>
+                  </label>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={guestAvailable}
+                      onChange={(event) => setGuestAvailable(event.target.checked)}
+                      disabled={busy}
+                    />
+                    <span>游客直接开放</span>
                   </label>
                 </div>
               </fieldset>
